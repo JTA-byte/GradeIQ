@@ -1,0 +1,52 @@
+/**
+ * Supabase client for use on the server (API routes, server components,
+ * middleware). Reads/writes the auth cookie so sessions persist across
+ * requests.
+ */
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { cookies } from "next/headers";
+
+export function createClient() {
+  const cookieStore = cookies();
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: CookieOptions) {
+          try {
+            cookieStore.set({ name, value, ...options });
+          } catch {
+            // Called from a Server Component -- safe to ignore if you
+            // have middleware refreshing sessions (see middleware.ts).
+          }
+        },
+        remove(name: string, options: CookieOptions) {
+          try {
+            cookieStore.set({ name, value: "", ...options });
+          } catch {
+            // Same as above -- safe to ignore with middleware in place.
+          }
+        },
+      },
+    }
+  );
+}
+
+/**
+ * Service-role client for trusted server-only operations that need to
+ * bypass row-level security (e.g. admin scripts, webhook handlers).
+ * NEVER import this into anything that runs in the browser.
+ */
+export function createServiceRoleClient() {
+  const { createClient: createSupabaseClient } = require("@supabase/supabase-js");
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false } }
+  );
+}
