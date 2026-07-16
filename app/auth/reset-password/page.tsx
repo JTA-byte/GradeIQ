@@ -23,7 +23,7 @@ export default function ResetPasswordPage() {
         : "https://grade-iq-t4wy.vercel.app";
 
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${redirectBase}/auth/callback?next=/auth/update-password`,
+      redirectTo: `${redirectBase}/auth/callback`,
     });
 
     if (error) {
