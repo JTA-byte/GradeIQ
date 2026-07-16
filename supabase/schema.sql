@@ -57,6 +57,28 @@ create table market_prices (
 create index idx_market_prices_card on market_prices (card_id, condition, recorded_at desc);
 
 -- =========================================
+-- MARKET_SALES: individual scraped graded-card sale records, from
+-- python-services/scrapers/ (130point, PriceCharting, Alt). Insert-only,
+-- like gem_rates, so sale history and price trends over time are
+-- preserved rather than overwritten.
+-- =========================================
+create table market_sales (
+  id uuid primary key default uuid_generate_v4(),
+  card_id uuid references cards(id) not null,
+  grader text, -- "PSA", "CGC", "BGS", "SGC", or null for ungraded/raw
+  grade text not null, -- e.g. "10", "9.5", "Raw"
+  sale_price numeric not null,
+  sale_date timestamptz not null,
+  source text not null check (source in ('ebay_sold', 'pricecharting', 'alt')),
+  scraped_at timestamptz default now()
+);
+
+create index idx_market_sales_card on market_sales (card_id, grader, grade, sale_date desc);
+
+alter table market_sales enable row level security;
+create policy "Anyone can read market_sales" on market_sales for select using (true);
+
+-- =========================================
 -- GRADER_EVENTS: news/context signals affecting grading decisions
 -- =========================================
 create table grader_events (

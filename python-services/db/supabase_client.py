@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from scrapers.base_scraper import PopRecord
+from scrapers.base_scraper import PopRecord, SaleRecord
 
 load_dotenv()
 
@@ -69,4 +70,29 @@ def write_pop_record(client: Client, card_id: str, record: PopRecord) -> None:
         )
     except Exception as e:
         logger.error(f"Failed to write pop record for card {card_id}: {e}")
+        raise
+
+
+def write_sale_record(client: Client, card_id: str, record: SaleRecord) -> None:
+    """
+    Inserts a new market_sales row. Insert-only (never update), same
+    reasoning as write_pop_record -- preserves sale history over time.
+    """
+    try:
+        client.table("market_sales").insert(
+            {
+                "card_id": card_id,
+                "grader": record.grader or None,
+                "grade": record.grade,
+                "sale_price": record.sale_price,
+                "sale_date": datetime.fromtimestamp(record.sale_date, tz=timezone.utc).isoformat(),
+                "source": record.source,
+            }
+        ).execute()
+        logger.info(
+            f"Wrote {record.source} sale for card {card_id}: "
+            f"{record.grader or 'raw'} {record.grade} @ ${record.sale_price}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to write sale record for card {card_id}: {e}")
         raise

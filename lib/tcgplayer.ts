@@ -26,6 +26,12 @@
  * `cards` row resolved/created by name. The resolved TCGPlayer product ID
  * is persisted onto `cards.tcgplayer_product_id` so repeat lookups skip
  * the product-search call and go straight to a pricing call.
+ *
+ * getGradedSalePrices() closes the graded-pricing gap described above --
+ * not from TCGPlayer, but from the `market_sales` table populated by the
+ * Python scrapers in python-services/scrapers/ (130point, PriceCharting,
+ * Alt). This is the real source of topGradePrice/midGradePrice now;
+ * mock data is only used when no recent sales exist for a card.
  */
 import { createServiceRoleClient } from "@/lib/supabase/server";
 
@@ -254,4 +260,69 @@ export async function getTCGPlayerRawPricing(cardName: string): Promise<TCGPlaye
     console.error("[tcgplayer] live pricing lookup failed for", cardName, ":", err);
     return null;
   }
+}
+
+export interface GradedSalePrices {
+  topGradePrice: number | null; // recent PSA 10 sale average, if any
+  midGradePrice: number | null; // recent PSA 9 sale average, if any
+}
+
+const SALE_LOOKBACK_DAYS = 90;
+const SALE_SAMPLE_SIZE = 5;
+
+async function averageRecentSalePrice(
+  cardId: string,
+  grader: string,
+  grade: string
+): Promise<number | null> {
+  const supabase = createServiceRoleClient();
+  const cutoff = new Date(Date.now() - SALE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data } = await supabase
+    .from("market_sales")
+    .select("sale_price")
+    .eq("card_id", cardId)
+    .eq("grader", grader)
+    .eq("grade", grade)
+    .gte("sale_date", cutoff)
+    .order("sale_date", { ascending: false })
+    .limit(SALE_SAMPLE_SIZE);
+
+  if (!data || data.length === 0) return null;
+
+  const prices: number[] = data.map((row: { sale_price: number }) => row.sale_price);
+  return prices.reduce((sum, price) => sum + price, 0) / prices.length;
+}
+
+/**
+ * Looks up real graded-card sale prices from `market_sales` (populated by
+ * the Python scrapers, not TCGPlayer). Averages up to the 5 most recent
+ * PSA 10 / PSA 9 sales within the last 90 days to smooth out single-sale
+ * outliers. Returns null for whichever grade has no recent sales --
+ * callers should fall back to mock data for those.
+ */
+export async function getGradedSalePrices(cardName: string): Promise<GradedSalePrices> {
+  let card: CardRow;
+  try {
+    card = await getOrCreateCard(cardName);
+  } catch (err) {
+    console.error("[tcgplayer] could not resolve cards row for graded sales:", err);
+    return { topGradePrice: null, midGradePrice: null };
+  }
+
+  const [topGradePrice, midGradePrice] = await Promise.all([
+    averageRecentSalePrice(card.id, "PSA", "10"),
+    averageRecentSalePrice(card.id, "PSA", "9"),
+  ]);
+
+  console.log(
+    "[tcgplayer] graded sale lookup for",
+    cardName,
+    "-> PSA10:",
+    topGradePrice,
+    "| PSA9:",
+    midGradePrice
+  );
+
+  return { topGradePrice, midGradePrice };
 }

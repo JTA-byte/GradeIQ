@@ -20,6 +20,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -40,6 +41,35 @@ class PopRecord:
     grade_pop: int  # how many copies exist at this exact grade
     total_pop: int  # total copies across all grades for this card
     scraped_at: float  # unix timestamp
+
+
+@dataclass
+class SaleRecord:
+    """Normalized graded-card sale record, same shape regardless of the
+    source site (130point, PriceCharting, Alt)."""
+    card_name: str
+    set_name: str
+    grader: str  # "PSA", "CGC", "BGS", "SGC", or "" for ungraded/raw
+    grade: str  # e.g. "10", "9.5", "Raw"
+    sale_price: float
+    sale_date: float  # unix timestamp of the sale itself; falls back to scrape time if unparseable
+    source: str  # 'ebay_sold' | 'pricecharting' | 'alt' -- see market_sales table check constraint
+
+
+def parse_date_safe(text: str, fallback: Optional[float] = None) -> float:
+    """
+    Best-effort parse of a human-readable date string (as scraped sites
+    format them) into a unix timestamp. Falls back to `fallback` (or the
+    current time) if the format isn't recognized -- a date-parsing miss
+    should never block writing the rest of a sale record.
+    """
+    text = (text or "").strip()
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).timestamp()
+        except ValueError:
+            continue
+    return fallback if fallback is not None else time.time()
 
 
 class RateLimiter:
@@ -131,3 +161,52 @@ class BaseGraderScraper(ABC):
                         f"All {self.max_retries} attempts failed for {card_name} ({set_name})"
                     )
         return None
+
+
+class BaseSaleScraper(ABC):
+    """
+    Subclass this per sale-history source (130point, PriceCharting, Alt).
+    Mirrors BaseGraderScraper's rate limiting / retry / robots.txt
+    handling, but returns a list of SaleRecord since a single card search
+    can surface many individual sales across grades, rather than one pop
+    aggregate -- fetch_sales() returning an empty list (not raising) is
+    the expected "card not found" outcome, so callers can fall back
+    gracefully without treating a miss as an error.
+    """
+
+    source_name: str = "UNKNOWN"
+    base_url: str = ""
+
+    def __init__(self, rate_limiter: Optional[RateLimiter] = None, max_retries: int = 3):
+        self.rate_limiter = rate_limiter or RateLimiter()
+        self.max_retries = max_retries
+        self.logger = logging.getLogger(f"scraper.{self.source_name.lower()}")
+
+    @abstractmethod
+    async def fetch_sales(self, card_name: str, set_name: str) -> list[SaleRecord]:
+        """Source-specific implementation. Must return a list (empty if not found)."""
+        raise NotImplementedError
+
+    async def scrape_with_retry(self, card_name: str, set_name: str) -> list[SaleRecord]:
+        for attempt in range(1, self.max_retries + 1):
+            await self.rate_limiter.wait()
+            try:
+                results = await self.fetch_sales(card_name, set_name)
+                if results:
+                    self.logger.info(f"Scraped {len(results)} sale(s) for {card_name} ({set_name})")
+                else:
+                    self.logger.info(f"No sales found for {card_name} ({set_name})")
+                return results
+            except Exception as e:
+                self.logger.warning(
+                    f"Attempt {attempt}/{self.max_retries} failed for "
+                    f"{card_name} ({set_name}): {e}"
+                )
+                if attempt < self.max_retries:
+                    backoff = (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(backoff)
+                else:
+                    self.logger.error(
+                        f"All {self.max_retries} attempts failed for {card_name} ({set_name})"
+                    )
+        return []

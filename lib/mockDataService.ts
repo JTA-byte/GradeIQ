@@ -3,20 +3,22 @@
  *
  * getCardMarketData calls the real TCGPlayer client (lib/tcgplayer.ts)
  * for raw market pricing when TCGPLAYER_API_KEY/SECRET are configured,
- * falling back to the mock profiles below if the keys aren't set, the
- * card isn't found, or the live lookup fails for any reason. TCGPlayer's
- * catalog has no graded-card pricing, so topGradePrice/midGradePrice
- * always come from the mock profiles regardless -- see lib/tcgplayer.ts
- * for why.
+ * and separately calls getGradedSalePrices() for real topGradePrice
+ * (PSA 10) / midGradePrice (PSA 9) values sourced from the market_sales
+ * table -- populated by the Python scrapers in python-services/scrapers/
+ * (130point, PriceCharting, Alt), not TCGPlayer, which has no graded-card
+ * pricing at all. Either lookup falls back to the mock profiles below
+ * independently whenever its real data isn't available (keys unset,
+ * card not found, no recent sales, or the lookup fails for any reason).
  *
  * getCardGemRates stands in for the PSA/CGC/BGS/TAG pop-report scraper
- * (python-services/) until that's wired up to write into `gem_rates`.
+ * until that's wired up to write into `gem_rates`.
  *
  * Sample data below is loosely modeled on real cards for realism,
  * but treat all numbers as illustrative, not live prices.
  */
 import { CardMarketData, GemRateData } from "./roiEngine";
-import { getTCGPlayerRawPricing } from "./tcgplayer";
+import { getGradedSalePrices, getTCGPlayerRawPricing } from "./tcgplayer";
 
 interface MockCardProfile {
   rawCost: number;
@@ -121,28 +123,33 @@ export async function getCardMarketData(
   shippingRoundTrip: number = 20
 ): Promise<CardMarketData> {
   const profile = findProfile(cardName);
-  const live = await getTCGPlayerRawPricing(cardName);
+  const [live, gradedSales] = await Promise.all([
+    getTCGPlayerRawPricing(cardName),
+    getGradedSalePrices(cardName),
+  ]);
+
+  const topGradePrice = gradedSales.topGradePrice ?? profile.topGradePrice;
+  const midGradePrice = gradedSales.midGradePrice ?? profile.midGradePrice;
 
   if (live && live.marketPrice !== null) {
     return {
       rawCost: live.lowPrice ?? live.marketPrice,
       rawMarketPrice: live.marketPrice,
-      // TCGPlayer's catalog has no graded-card pricing -- these stay mock.
-      topGradePrice: profile.topGradePrice,
-      midGradePrice: profile.midGradePrice,
+      topGradePrice,
+      midGradePrice,
       shippingRoundTrip,
     };
   }
 
-  // No keys configured, or the live lookup failed/found nothing.
+  // No TCGPlayer keys configured, or the live lookup failed/found nothing.
   // Simulate network latency like a real API call.
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   return {
     rawCost: profile.rawCost,
     rawMarketPrice: profile.rawMarketPrice,
-    topGradePrice: profile.topGradePrice,
-    midGradePrice: profile.midGradePrice,
+    topGradePrice,
+    midGradePrice,
     shippingRoundTrip,
   };
 }
