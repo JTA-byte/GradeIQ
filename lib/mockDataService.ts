@@ -1,15 +1,22 @@
 /**
- * Mock data service for card market prices and gem rates.
+ * Market price + gem rate data service.
  *
- * This stands in for live TCGPlayer API + PSA/CGC pop scraping until
- * those integrations are wired up. Swap `getCardMarketData` and
- * `getCardGemRates` for real implementations later -- the function
- * signatures are designed to match what the real services will return.
+ * getCardMarketData calls the real TCGPlayer client (lib/tcgplayer.ts)
+ * for raw market pricing when TCGPLAYER_API_KEY/SECRET are configured,
+ * falling back to the mock profiles below if the keys aren't set, the
+ * card isn't found, or the live lookup fails for any reason. TCGPlayer's
+ * catalog has no graded-card pricing, so topGradePrice/midGradePrice
+ * always come from the mock profiles regardless -- see lib/tcgplayer.ts
+ * for why.
+ *
+ * getCardGemRates stands in for the PSA/CGC/BGS/TAG pop-report scraper
+ * (python-services/) until that's wired up to write into `gem_rates`.
  *
  * Sample data below is loosely modeled on real cards for realism,
  * but treat all numbers as illustrative, not live prices.
  */
 import { CardMarketData, GemRateData } from "./roiEngine";
+import { getTCGPlayerRawPricing } from "./tcgplayer";
 
 interface MockCardProfile {
   rawCost: number;
@@ -113,10 +120,24 @@ export async function getCardMarketData(
   cardName: string,
   shippingRoundTrip: number = 20
 ): Promise<CardMarketData> {
-  // Simulate network latency like a real API call
+  const profile = findProfile(cardName);
+  const live = await getTCGPlayerRawPricing(cardName);
+
+  if (live && live.marketPrice !== null) {
+    return {
+      rawCost: live.lowPrice ?? live.marketPrice,
+      rawMarketPrice: live.marketPrice,
+      // TCGPlayer's catalog has no graded-card pricing -- these stay mock.
+      topGradePrice: profile.topGradePrice,
+      midGradePrice: profile.midGradePrice,
+      shippingRoundTrip,
+    };
+  }
+
+  // No keys configured, or the live lookup failed/found nothing.
+  // Simulate network latency like a real API call.
   await new Promise((resolve) => setTimeout(resolve, 150));
 
-  const profile = findProfile(cardName);
   return {
     rawCost: profile.rawCost,
     rawMarketPrice: profile.rawMarketPrice,
