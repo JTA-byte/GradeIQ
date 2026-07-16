@@ -48,8 +48,17 @@ export function createClient() {
  * NEVER import this into anything that runs in the browser.
  */
 export function createServiceRoleClient() {
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!serviceRoleKey) {
+    throw new Error(
+      "SUPABASE_SERVICE_ROLE_KEY is not set in this environment. It lives in .env.local locally " +
+        "(gitignored, never deployed) -- add it separately in Vercel Project Settings -> " +
+        "Environment Variables, then redeploy."
+    );
+  }
+
   const { createClient: createSupabaseClient } = require("@supabase/supabase-js");
-  return createSupabaseClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+  return createSupabaseClient(SUPABASE_URL, serviceRoleKey, {
     auth: { persistSession: false },
   });
 }
