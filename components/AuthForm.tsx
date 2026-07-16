@@ -82,7 +82,17 @@ export function AuthForm({ mode }: AuthFormProps) {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="font-mono text-xs text-slate">Password</label>
+            <div className="flex items-center justify-between">
+              <label className="font-mono text-xs text-slate">Password</label>
+              {mode === "login" && (
+                <a
+                  href="/auth/reset-password"
+                  className="font-mono text-xs text-moss underline underline-offset-2"
+                >
+                  Forgot password?
+                </a>
+              )}
+            </div>
             <input
               type="password"
               value={password}
