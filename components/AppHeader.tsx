@@ -62,6 +62,14 @@ export function AppHeader() {
                   {scansLeft === 0 ? "No scans left" : `${scansLeft} scan${scansLeft === 1 ? "" : "s"} left`}
                 </span>
               )}
+              {isFree && (
+                <a
+                  href="/upgrade"
+                  className="font-mono text-xs bg-ink text-paper px-3 py-1 hover:bg-moss transition-colors"
+                >
+                  Upgrade to Pro
+                </a>
+              )}
               {!isFree && (
                 <span className="font-mono text-xs text-moss border border-moss px-2 py-1">
                   Pro
