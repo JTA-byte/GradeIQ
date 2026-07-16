@@ -17,8 +17,13 @@ export default function ResetPasswordPage() {
     setLoading(true);
     setMessage(null);
 
+    const redirectBase =
+      window.location.hostname === "localhost"
+        ? "http://localhost:3000"
+        : "https://grade-iq-t4wy.vercel.app";
+
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/callback?next=/auth/update-password`,
+      redirectTo: `${redirectBase}/auth/callback?next=/auth/update-password`,
     });
 
     if (error) {
