@@ -31,6 +31,42 @@ interface SlotImage {
   mediaType: string;
 }
 
+// Vercel serverless functions cap request bodies at 4.5MB, and 10 full-res
+// photos in one JSON payload can easily blow past that. Resizing to 1500px
+// on the longest side (still plenty of detail for grading) before the
+// photo ever enters state keeps the whole request comfortably under that.
+const MAX_DIMENSION = 1500;
+
+function resizeImageFile(file: File): Promise<{ dataUrl: string; mediaType: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Failed to read photo"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Failed to load photo"));
+      img.onload = () => {
+        const scale = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
+        const width = Math.round(img.width * scale);
+        const height = Math.round(img.height * scale);
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Canvas not supported in this browser"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+
+        resolve({ dataUrl: canvas.toDataURL("image/jpeg", 0.9), mediaType: "image/jpeg" });
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 interface AnalysisResponse {
   vision: {
     frontCenteringPct: number;
@@ -86,21 +122,21 @@ export default function HomePage() {
     fileInputRef.current?.click();
   }
 
-  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     const slotKey = activeSlot;
     e.target.value = "";
     if (!file || !slotKey) return;
-    const mediaType = file.type;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
+
+    try {
+      const { dataUrl, mediaType } = await resizeImageFile(file);
       setSlotImages((prev) => ({
         ...prev,
         [slotKey]: { preview: dataUrl, base64: dataUrl.split(",")[1], mediaType },
       }));
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setError({ message: err instanceof Error ? err.message : "Could not process that photo" });
+    }
   }
 
   async function handleAnalyze() {
