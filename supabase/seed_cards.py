@@ -12,11 +12,14 @@ Requires: httpx, supabase, python-dotenv -- the same packages already
 pinned in python-services/requirements.txt. If they're not installed:
   pip install -r ../python-services/requirements.txt
 
-Reads NEXT_PUBLIC_SUPABASE_URL (falling back to SUPABASE_URL) and
-SUPABASE_SERVICE_ROLE_KEY from ../.env.local (the Next.js app's env
-file -- note python-services/ has its own separate .env with
-SUPABASE_URL under a different convention; this script targets the
-root gradeiq/.env.local specifically, as requested).
+Reads NEXT_PUBLIC_SUPABASE_URL (falling back to SUPABASE_URL),
+SUPABASE_SERVICE_ROLE_KEY, and POKEMONTCG_API_KEY from ../.env.local (the
+Next.js app's env file -- note python-services/ has its own separate
+.env with SUPABASE_URL under a different convention; this script targets
+the root gradeiq/.env.local specifically, as requested).
+POKEMONTCG_API_KEY is optional -- without it the API still works, just
+at the lower unauthenticated rate limit (see REQUEST_DELAY_SECONDS
+below). If set, it's sent as an X-Api-Key header on every request.
 
 --------------------------------------------------------------------------
 Two corrections worth knowing about before you run this:
@@ -72,7 +75,17 @@ RARITY_ALLOWLIST = [
 # 2.5s between page requests keeps this comfortably under that even for
 # a multi-thousand-card seed run.
 REQUEST_DELAY_SECONDS = 2.5
+REQUEST_TIMEOUT_SECONDS = 30.0
+RETRY_DELAY_SECONDS = 5.0
 MAX_RETRIES = 3
+
+
+def build_headers() -> dict:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; GradeIQ-Seed/1.0)"}
+    api_key = os.environ.get("POKEMONTCG_API_KEY")
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    return headers
 
 
 def build_query() -> str:
@@ -98,8 +111,7 @@ def fetch_cards_page(client: httpx.Client, page: int) -> dict:
             response = client.get(
                 API_BASE,
                 params={"q": build_query(), "page": page, "pageSize": PAGE_SIZE},
-                headers={"User-Agent": "Mozilla/5.0 (compatible; GradeIQ-Seed/1.0)"},
-                timeout=30.0,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()
@@ -107,7 +119,7 @@ def fetch_cards_page(client: httpx.Client, page: int) -> dict:
             last_error = e
             print(f"  Page {page} attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
-                time.sleep(3 * attempt)
+                time.sleep(RETRY_DELAY_SECONDS)
     raise RuntimeError(f"Failed to fetch page {page} after {MAX_RETRIES} attempts") from last_error
 
 
@@ -136,7 +148,7 @@ def run() -> None:
     total_fetched = 0
     total_count: Optional[int] = None
 
-    with httpx.Client() as http_client:
+    with httpx.Client(headers=build_headers()) as http_client:
         page = 1
         while True:
             print(f"Fetching page {page} (pageSize={PAGE_SIZE})...")
