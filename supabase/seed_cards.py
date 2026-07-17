@@ -75,9 +75,9 @@ RARITY_ALLOWLIST = [
 # 2.5s between page requests keeps this comfortably under that even for
 # a multi-thousand-card seed run.
 REQUEST_DELAY_SECONDS = 2.5
-REQUEST_TIMEOUT_SECONDS = 30.0
-RETRY_DELAY_SECONDS = 5.0
-MAX_RETRIES = 3
+REQUEST_TIMEOUT_SECONDS = 60.0
+RETRY_DELAY_SECONDS = 10.0
+MAX_RETRIES = 5
 
 
 def build_headers() -> dict:
