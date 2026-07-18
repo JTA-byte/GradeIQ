@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { BuySignal, PriceConfidence } from "@/lib/buySignals";
 import { ebayGradedSoldListingsUrl, ebaySoldListingsUrl } from "@/lib/ebayLink";
+import { buildSaleListingUrl } from "@/lib/saleListingLink";
 
 type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice" | "gapDollars";
 
@@ -321,10 +322,16 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
               </p>
             ) : (
               s.recentSales.map((sale, i) => (
-                <p key={i} className="font-mono text-xs text-slate">
+                <a
+                  key={i}
+                  href={buildSaleListingUrl(s.cardName, sale)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block font-mono text-xs text-slate hover:text-moss transition-colors underline decoration-dotted underline-offset-2"
+                >
                   {sale.grader ? `${sale.grader} ${sale.grade}` : "Raw"} — $
                   {sale.price.toLocaleString()} — {formatFullDate(sale.date)} — {sale.sourceLabel}
-                </p>
+                </a>
               ))
             )}
           </div>

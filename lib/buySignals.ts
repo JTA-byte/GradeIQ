@@ -93,6 +93,7 @@ export interface RecentSaleDisplay {
   date: string; // ISO date
   source: string; // 'ebay_sold' | 'pricecharting' | 'alt'
   sourceLabel: string; // human-readable, e.g. "Alt.xyz"
+  sourceUrl: string | null; // direct listing link, when the scraper captured one (Alt sales only today)
 }
 
 export interface BuySignal {
@@ -128,6 +129,7 @@ interface MarketSaleRow {
   sale_price: number;
   sale_date: string;
   source: string;
+  source_url: string | null;
 }
 
 interface CardRow {
@@ -358,15 +360,47 @@ function confidenceFor(recentSaleCount90d: number): PriceConfidence {
  * this does real aggregation work across every scraped sale, and the
  * underlying data only actually changes once a night anyway.
  */
+/**
+ * Fetches every market_sales row, tolerating the source_url column not
+ * existing yet -- it's added in supabase/schema.sql but, per this
+ * project's convention, applied to the live DB by hand rather than by
+ * this code. Without the fallback below, a deploy of this feature would
+ * hard-break the entire Buy Signals page (this query runs on every page
+ * load) for however long it takes to run that migration; sourceUrl is
+ * optional display metadata, not something the ROI/IQ math depends on,
+ * so degrading to null for it is the right tradeoff.
+ */
+async function fetchMarketSales(
+  supabase: ReturnType<typeof createServiceRoleClient>
+): Promise<MarketSaleRow[]> {
+  try {
+    return await fetchAllRows<MarketSaleRow>(
+      supabase,
+      "market_sales",
+      "card_id, grader, grade, sale_price, sale_date, source, source_url"
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("source_url")) throw err;
+
+    console.warn(
+      "[buySignals] market_sales.source_url doesn't exist yet -- falling back without it. " +
+        "Run the migration in supabase/schema.sql to enable direct sale listing links."
+    );
+    const rows = await fetchAllRows<Omit<MarketSaleRow, "source_url">>(
+      supabase,
+      "market_sales",
+      "card_id, grader, grade, sale_price, sale_date, source"
+    );
+    return rows.map((r) => ({ ...r, source_url: null }));
+  }
+}
+
 export async function getBuySignals(): Promise<BuySignal[]> {
   const supabase = createServiceRoleClient();
 
   const [sales, cards, gemRateRows] = await Promise.all([
-    fetchAllRows<MarketSaleRow>(
-      supabase,
-      "market_sales",
-      "card_id, grader, grade, sale_price, sale_date, source"
-    ),
+    fetchMarketSales(supabase),
     fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name, card_number"),
     fetchAllRows<GemRateRow>(supabase, "gem_rates", "card_id, grader, total_pop, gem_rate, scraped_at"),
   ]);
@@ -435,6 +469,7 @@ export async function getBuySignals(): Promise<BuySignal[]> {
           date: s.sale_date,
           source: s.source,
           sourceLabel: SOURCE_DISPLAY[s.source] ?? s.source,
+          sourceUrl: s.source_url,
         }));
 
       signals.push({

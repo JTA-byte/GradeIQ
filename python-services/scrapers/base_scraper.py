@@ -54,6 +54,7 @@ class SaleRecord:
     sale_price: float
     sale_date: float  # unix timestamp of the sale itself; falls back to scrape time if unparseable
     source: str  # 'ebay_sold' | 'pricecharting' | 'alt' -- see market_sales table check constraint
+    source_url: Optional[str] = None  # direct link to the actual listing, when the scraper captured one
 
 
 def parse_date_safe(text: str, fallback: Optional[float] = None) -> float:

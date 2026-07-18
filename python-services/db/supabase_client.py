@@ -120,6 +120,7 @@ def write_sale_record(client: Client, card_id: str, record: SaleRecord) -> None:
                 "sale_price": record.sale_price,
                 "sale_date": datetime.fromtimestamp(record.sale_date, tz=timezone.utc).isoformat(),
                 "source": record.source,
+                "source_url": record.source_url,
             }
         ).execute()
         logger.info(

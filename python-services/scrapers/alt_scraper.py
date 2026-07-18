@@ -190,6 +190,26 @@ class AltScraper(BaseSaleScraper):
                     except Exception:
                         pass
 
+                    # Each result card links to its own /itm/{uuid} detail page
+                    # (confirmed live: the row's first <a> has
+                    # href="/itm/{uuid}/sold") -- this is Alt's own page for
+                    # the sale, not the external marketplace listing, but
+                    # it's the direct, permanent link this app can offer
+                    # users regardless of which marketplace the sale came
+                    # from. Stripped of the "/sold" suffix since
+                    # /itm/{uuid} (no suffix) resolves identically (both
+                    # verified live, 200 OK).
+                    source_url = None
+                    try:
+                        href = await row.locator('a[href^="/itm/"]').first.get_attribute("href")
+                        if href:
+                            item_path = href.split("?")[0]
+                            if item_path.endswith("/sold"):
+                                item_path = item_path[: -len("/sold")]
+                            source_url = f"{self.base_url}{item_path}"
+                    except Exception:
+                        pass
+
                     records.append(
                         SaleRecord(
                             card_name=card_name,
@@ -199,6 +219,7 @@ class AltScraper(BaseSaleScraper):
                             sale_price=float(price_match.group(0)),
                             sale_date=sale_date,
                             source=source,
+                            source_url=source_url,
                         )
                     )
 

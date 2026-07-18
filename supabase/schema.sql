@@ -70,6 +70,7 @@ create table market_sales (
   sale_price numeric not null,
   sale_date timestamptz not null,
   source text not null check (source in ('ebay_sold', 'pricecharting', 'alt')),
+  source_url text, -- direct link to the actual listing, when the scraper captured one (e.g. Alt.xyz's /itm/{id}); null for older rows or sources that don't expose a stable per-sale URL
   scraped_at timestamptz default now()
 );
 
