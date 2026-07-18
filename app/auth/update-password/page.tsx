@@ -40,7 +40,7 @@ export default function UpdatePasswordPage() {
     } else {
       setMessage({ type: "success", text: "Password updated. Redirecting..." });
       setTimeout(() => {
-        window.location.href = "/";
+        window.location.href = "/scan";
       }, 1500);
     }
   }

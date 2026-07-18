@@ -7,7 +7,7 @@ export default function ConfirmPage() {
           Your email has been confirmed. Start analyzing cards.
         </p>
         <a
-          href="/"
+          href="/scan"
           className="inline-block bg-ink text-paper font-mono text-sm uppercase tracking-widest px-6 py-3 hover:bg-moss transition-colors"
         >
           Open GradeIQ

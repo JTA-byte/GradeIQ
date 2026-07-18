@@ -43,7 +43,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       if (error) {
         setMessage({ type: "error", text: error.message });
       } else {
-        window.location.href = "/";
+        window.location.href = "/scan";
       }
     }
 

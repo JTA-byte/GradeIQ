@@ -53,7 +53,7 @@ export default async function ScansPage() {
       <div className="max-w-4xl mx-auto px-6 py-10">
         <div className="flex items-baseline justify-between mb-6">
           <h2 className="font-display text-2xl">Scan history</h2>
-          <a href="/" className="font-mono text-xs text-moss underline underline-offset-2">
+          <a href="/scan" className="font-mono text-xs text-moss underline underline-offset-2">
             ← New scan
           </a>
         </div>
@@ -65,7 +65,7 @@ export default async function ScansPage() {
         {!error && scanList.length === 0 && (
           <div className="border border-line p-8 text-center">
             <p className="font-mono text-sm text-slate">No scans yet.</p>
-            <a href="/" className="mt-3 inline-block font-mono text-xs text-moss underline underline-offset-2">
+            <a href="/scan" className="mt-3 inline-block font-mono text-xs text-moss underline underline-offset-2">
               Analyze your first card →
             </a>
           </div>

@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
     mode: "subscription",
     customer: customerId,
     line_items: [{ price: process.env.STRIPE_PRO_PRICE_ID ?? "", quantity: 1 }],
-    success_url: `${origin}/?upgraded=true`,
+    success_url: `${origin}/scan?upgraded=true`,
     cancel_url: `${origin}/upgrade`,
     metadata: { user_id: user.id },
   });
