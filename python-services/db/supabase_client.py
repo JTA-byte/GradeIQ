@@ -34,12 +34,20 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
-def get_cards_to_scrape(client: Client, limit: Optional[int] = None) -> list[dict]:
+def get_cards_to_scrape(
+    client: Client, limit: Optional[int] = None, offset: int = 0
+) -> list[dict]:
     """
     Returns cards from the `cards` table that need a gem rate scrape.
     For the nightly job, you'd typically scrape every card, or prioritize
     cards that haven't been scraped recently / are flagged high-priority
     by user scan volume. This starts simple: return all cards.
+
+    `offset` lets a caller ask for a specific slice of the table (e.g.
+    "cards 1000-1999") -- used by the nightly price-scrape job to split
+    ~6,400 cards into parallel GitHub Actions matrix batches instead of
+    one job scraping all of them sequentially and hitting the 6-hour
+    Actions job time limit.
 
     Paginates via .range() rather than a single .select().execute() call.
     PostgREST (Supabase's API layer) caps any unpaginated request at 1000
@@ -50,7 +58,7 @@ def get_cards_to_scrape(client: Client, limit: Optional[int] = None) -> list[dic
     """
     page_size = 1000
     all_cards: list[dict] = []
-    offset = 0
+    current_offset = offset
 
     while True:
         remaining = page_size if limit is None else min(page_size, limit - len(all_cards))
@@ -60,7 +68,7 @@ def get_cards_to_scrape(client: Client, limit: Optional[int] = None) -> list[dic
         response = (
             client.table("cards")
             .select("id, name, set_name")
-            .range(offset, offset + remaining - 1)
+            .range(current_offset, current_offset + remaining - 1)
             .execute()
         )
         page = response.data
@@ -68,7 +76,7 @@ def get_cards_to_scrape(client: Client, limit: Optional[int] = None) -> list[dic
 
         if len(page) < remaining:
             break  # last page -- fewer rows came back than we asked for
-        offset += remaining
+        current_offset += remaining
 
     return all_cards
 

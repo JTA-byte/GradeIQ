@@ -1,15 +1,24 @@
 /**
  * Market price + gem rate data service.
  *
- * getCardMarketData calls the real TCGPlayer client (lib/tcgplayer.ts)
- * for raw market pricing when TCGPLAYER_API_KEY/SECRET are configured,
- * and separately calls getGradedSalePrices() for real topGradePrice
- * (PSA 10) / midGradePrice (PSA 9) values sourced from the market_sales
- * table -- populated by the Python scrapers in python-services/scrapers/
+ * getCardMarketData resolves raw (ungraded) pricing through three tiers,
+ * falling through to the next whenever the previous one isn't available:
+ *   1. TCGPlayer (lib/tcgplayer.ts) when TCGPLAYER_API_KEY/SECRET are set
+ *   2. PriceCharting (lib/priceCharting.ts) -- real sold-listing medians,
+ *      scraped live at request time (no API key needed)
+ *   3. Mock profiles below (illustrative, not real prices)
+ * Each tier's result carries a `priceConfidence` ("high" | "medium" |
+ * "low") so callers/UI can show how much to trust the number: TCGPlayer's
+ * live market price is "high", PriceCharting's confidence depends on
+ * recent sale volume (see lib/priceCharting.ts), and mock data is always
+ * "low" since it isn't real.
+ *
+ * Separately, getGradedSalePrices() supplies real topGradePrice (PSA 10)
+ * / midGradePrice (PSA 9) values sourced from the market_sales table --
+ * populated by the Python scrapers in python-services/scrapers/
  * (130point, PriceCharting, Alt), not TCGPlayer, which has no graded-card
- * pricing at all. Either lookup falls back to the mock profiles below
- * independently whenever its real data isn't available (keys unset,
- * card not found, no recent sales, or the lookup fails for any reason).
+ * pricing at all. This also falls back to the mock profiles below
+ * whenever no recent sales exist for a card.
  *
  * getCardGemRates stands in for the PSA/CGC/BGS/TAG pop-report scraper
  * until that's wired up to write into `gem_rates`.
@@ -18,6 +27,7 @@
  * but treat all numbers as illustrative, not live prices.
  */
 import { CardMarketData, GemRateData } from "./roiEngine";
+import { getPriceChartingRawPricing, PriceConfidence } from "./priceCharting";
 import { getGradedSalePrices, getTCGPlayerRawPricing } from "./tcgplayer";
 
 interface MockCardProfile {
@@ -136,7 +146,7 @@ export function isUnknownCard(cardName: string): boolean {
 export async function getCardMarketData(
   cardName: string,
   shippingRoundTrip: number = 20
-): Promise<CardMarketData> {
+): Promise<CardMarketData & { priceConfidence: PriceConfidence }> {
   const profile = findProfile(cardName);
   const [live, gradedSales] = await Promise.all([
     getTCGPlayerRawPricing(cardName),
@@ -153,11 +163,28 @@ export async function getCardMarketData(
       topGradePrice,
       midGradePrice,
       shippingRoundTrip,
+      priceConfidence: "high",
     };
   }
 
-  // No TCGPlayer keys configured, or the live lookup failed/found nothing.
-  // Simulate network latency like a real API call.
+  // No TCGPlayer keys configured, or the live lookup failed/found nothing --
+  // try PriceCharting's real sold-listing medians next, before falling
+  // back to mock data.
+  const priceCharting = await getPriceChartingRawPricing(cardName);
+  if (priceCharting && priceCharting.primaryPrice !== null) {
+    return {
+      rawCost: priceCharting.primaryPrice,
+      rawMarketPrice: priceCharting.primaryPrice,
+      topGradePrice,
+      midGradePrice,
+      shippingRoundTrip,
+      priceConfidence: priceCharting.confidence,
+    };
+  }
+
+  // Neither real source had this card. Simulate network latency like a
+  // real API call, then fall back to mock data -- flagged "low" confidence
+  // since it isn't real.
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   return {
@@ -166,6 +193,7 @@ export async function getCardMarketData(
     topGradePrice,
     midGradePrice,
     shippingRoundTrip,
+    priceConfidence: "low",
   };
 }
 

@@ -8,6 +8,14 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # ~6,400 cards split into 7 parallel batches of ~1,000 each -- a
+      # single sequential run over every card was hitting GitHub Actions'
+      # 6-hour job time limit. Bump this list (and BATCH_SIZE below stays
+      # in sync with it) if the cards table grows past ~7,000 rows.
+      matrix:
+        batch: [0, 1, 2, 3, 4, 5, 6]
     defaults:
       run:
         working-directory: python-services
@@ -24,8 +32,12 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 
-      - name: Run nightly price scrape
+      - name: Run nightly price scrape (batch ${{ matrix.batch }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -m jobs.nightly_price_scrape
+          BATCH_SIZE: 1000
+        run: |
+          python -m jobs.nightly_price_scrape \
+            --offset $(( ${{ matrix.batch }} * BATCH_SIZE )) \
+            --limit $BATCH_SIZE
