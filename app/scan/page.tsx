@@ -1,12 +1,20 @@
 "use client";
 
-import { useState } from "react";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppHeader } from "@/components/AppHeader";
 import { AppFooter } from "@/components/AppFooter";
 import { GraderSlab } from "@/components/GraderSlab";
 import type { FullRecommendation } from "@/lib/roiEngine";
-import { ebaySoldListingsUrl } from "@/lib/ebayLink";
+import { ebayRawSoldListingsUrl } from "@/lib/ebayLink";
+import { CARD_LANGUAGES, CardLanguage } from "@/lib/cardLanguage";
+
+interface CardSuggestion {
+  id: string;
+  name: string;
+  set_name: string;
+  card_number: string | null;
+  language: string | null;
+}
 
 interface SlotDef {
   key: string;
@@ -129,12 +137,60 @@ function verdictStyle(verdict: string): { label: string; className: string } {
 
 export default function ScanPage() {
   const [cardName, setCardName] = useState("");
+  const [setName, setSetName] = useState("");
+  const [cardNumber, setCardNumber] = useState("");
+  const [language, setLanguage] = useState<CardLanguage>("English");
+  const [suggestions, setSuggestions] = useState<CardSuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [slotImages, setSlotImages] = useState<Record<string, SlotImage | undefined>>({});
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ message: string; isLimit?: boolean } | null>(null);
   const [result, setResult] = useState<AnalysisResponse | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const hasRequiredCardFields = Boolean(cardName.trim() && setName.trim() && cardNumber.trim());
+
+  // Debounced autocomplete: look up matching cards as the user types a
+  // name/set, so they can pick the exact printing (and auto-fill its
+  // card number) instead of hunting for it on the card themselves.
+  useEffect(() => {
+    if (cardName.trim().length < 2 && setName.trim().length < 2) {
+      setSuggestions([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams();
+        if (cardName.trim()) params.set("name", cardName.trim());
+        if (setName.trim()) params.set("set", setName.trim());
+        const res = await fetch(`/api/cards/search?${params}`, { signal: controller.signal });
+        if (!res.ok) return;
+        const data = await res.json();
+        setSuggestions(data.cards ?? []);
+      } catch {
+        // Autocomplete failing silently is fine -- the user can still
+        // type the card number by hand.
+      }
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [cardName, setName]);
+
+  function applySuggestion(suggestion: CardSuggestion) {
+    setCardName(suggestion.name);
+    setSetName(suggestion.set_name);
+    setCardNumber(suggestion.card_number ?? "");
+    if (suggestion.language && (CARD_LANGUAGES as string[]).includes(suggestion.language)) {
+      setLanguage(suggestion.language as CardLanguage);
+    }
+    setShowSuggestions(false);
+  }
 
   const uploadedCount = SLOTS.filter((slot) => slotImages[slot.key]).length;
   const hasRequiredPhotos = SLOTS.filter((slot) => slot.required).every(
@@ -164,9 +220,10 @@ export default function ScanPage() {
   }
 
   async function handleAnalyze() {
-    if (!hasRequiredPhotos || !cardName.trim()) {
+    if (!hasRequiredPhotos || !hasRequiredCardFields) {
       setError({
-        message: "Please upload at least the Front Full and Back Full photos and enter the card name.",
+        message:
+          "Please upload at least the Front Full and Back Full photos, and fill in card name, set name, and card number.",
       });
       return;
     }
@@ -180,7 +237,10 @@ export default function ScanPage() {
       mediaType: slotImages[slot.key]!.mediaType,
     }));
 
-    const requestBody = JSON.stringify({ images, cardName });
+    const requestBody = JSON.stringify({
+      images,
+      card: { name: cardName, setName, cardNumber, language },
+    });
 
     // Logs to the browser console so a payload that's still too large shows
     // up immediately, rather than only surfacing as a cryptic 413 from
@@ -303,22 +363,77 @@ export default function ScanPage() {
 
           <section className="flex flex-col justify-between">
             <div>
-              <h2 className="font-display text-lg mb-3">2. Card name</h2>
+              <h2 className="font-display text-lg mb-3">2. Identify your card</h2>
+
+              <div className="relative mb-2">
+                <input
+                  type="text"
+                  value={cardName}
+                  onChange={(e) => setCardName(e.target.value)}
+                  onFocus={() => setShowSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                  placeholder="Card name -- e.g. Charizard"
+                  className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss"
+                />
+                {showSuggestions && suggestions.length > 0 && (
+                  <ul className="absolute z-10 top-full left-0 right-0 mt-1 border border-line bg-paper shadow-md max-h-56 overflow-y-auto">
+                    {suggestions.map((s) => (
+                      <li key={s.id}>
+                        <button
+                          type="button"
+                          onMouseDown={() => applySuggestion(s)}
+                          className="w-full text-left px-4 py-2 font-mono text-xs hover:bg-moss/10 transition-colors"
+                        >
+                          {s.name} — {s.set_name}
+                          {s.card_number && ` #${s.card_number}`}
+                          {s.language && ` (${s.language})`}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
               <input
                 type="text"
-                value={cardName}
-                onChange={(e) => setCardName(e.target.value)}
-                placeholder="e.g. Umbreon VMAX Alt Art"
+                value={setName}
+                onChange={(e) => setSetName(e.target.value)}
+                onFocus={() => setShowSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                placeholder="Set name -- e.g. Base Set"
                 className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+              />
+
+              <input
+                type="text"
+                value={cardNumber}
+                onChange={(e) => setCardNumber(e.target.value)}
+                placeholder="Card number -- e.g. 4/102"
+                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-1"
                 onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
               />
-              <p className="font-mono text-xs text-slate/60">
-                Try: Umbreon VMAX Alt Art · Charizard Base Set Shadowless · Pikachu Surging Sparks SIR
+              <p className="font-mono text-[11px] text-slate/60 mb-2">
+                Tip: Find the card number in the bottom left or right corner of your card.
               </p>
+
+              <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+                Language
+              </label>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value as CardLanguage)}
+                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss"
+              >
+                {CARD_LANGUAGES.map((lang) => (
+                  <option key={lang} value={lang}>
+                    {lang}
+                  </option>
+                ))}
+              </select>
             </div>
             <button
               onClick={handleAnalyze}
-              disabled={loading || !hasRequiredPhotos}
+              disabled={loading || !hasRequiredPhotos || !hasRequiredCardFields}
               className="mt-6 w-full bg-ink text-paper font-mono text-sm uppercase tracking-widest py-4 hover:bg-moss transition-colors disabled:opacity-40"
             >
               {loading ? "Analyzing..." : "Run analysis"}
@@ -418,7 +533,7 @@ export default function ScanPage() {
                   )}
                 </div>
                 <a
-                  href={ebaySoldListingsUrl(cardName)}
+                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, language })}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"

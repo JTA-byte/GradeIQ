@@ -1,8 +1,18 @@
 /**
- * Dynamic card lookup: when a user analyzes a card GradeIQ doesn't have
- * in the `cards` table yet, this searches the Pokémon TCG API for it and
- * inserts a real row (name, set_name, card_number, rarity) instead of
- * leaving the card permanently stuck on mock data.
+ * Best-effort card enrichment via the Pokémon TCG API.
+ *
+ * Card identity resolution (name + set + card number + language) is now
+ * driven directly by the scan form -- see lib/cardIdentifier.ts's
+ * resolveOrCreateCard(), which the analyze route calls to get a real
+ * cards row before this ever runs. This file's job shrank to just
+ * backfilling supplementary fields the user didn't provide (currently
+ * `rarity`) for a newly-created row, since the user's own identity
+ * fields are already authoritative and don't need "discovering."
+ *
+ * Fire-and-forget from the analyze route: failure here is always
+ * non-fatal and never affects the scan's own result, which was already
+ * computed from the user-supplied identity regardless of whether this
+ * succeeds.
  *
  * Scope note -- what this does NOT do: it does not run the Alt.xyz
  * scraper. That scraper is Python/Playwright (python-services/), and
@@ -12,19 +22,9 @@
  * request has to spare regardless. Newly-inserted cards get picked up
  * automatically the next time the existing nightly GitHub Actions job
  * (jobs/nightly_price_scrape.py) runs -- get_cards_to_scrape() already
- * returns every row in `cards`, new or old. For a genuinely immediate
- * scrape of one specific card, see python-services/scrapers/
- * on_demand_scrape.py, which is a standalone script for manual or
- * future webhook/queue use -- not something this file can invoke inline.
+ * returns every row in `cards`, new or old.
  */
 import { createServiceRoleClient } from "@/lib/supabase/server";
-
-interface PokemonTCGCard {
-  name: string;
-  setName: string;
-  cardNumber: string;
-  rarity: string | null;
-}
 
 async function queryPokemonTCGApi(nameQuery: string, headers: Record<string, string>) {
   const query = `name:"${nameQuery}"`;
@@ -44,19 +44,11 @@ async function queryPokemonTCGApi(nameQuery: string, headers: Record<string, str
  * `name:"Umbreon VMAX Alt Art"` returns zero results, because the API's
  * actual name for that card is just "Umbreon VMAX" ("Alt Art" is a
  * GradeIQ-side descriptor for the illustration, not part of the card's
- * name). That exact string is one of this app's own suggested example
- * searches (see the placeholder text in app/page.tsx), so a strict exact
- * match would systematically fail on it -- and likely on plenty of other
- * user input following the same "<card name> <descriptor>" pattern
- * (e.g. "SIR", "Alternate Art").
- *
- * To handle that without hardcoding a list of descriptor words, this
- * retries with the last word dropped, repeatedly, until a match is
- * found or there's only one word left. Confirmed empirically: "Umbreon
- * VMAX Alt Art" needs two words trimmed ("Alt Art") before "Umbreon
- * VMAX" matches.
+ * name). To handle that without hardcoding a list of descriptor words,
+ * this retries with the last word dropped, repeatedly, until a match is
+ * found or there's only one word left.
  */
-async function searchPokemonTCGApi(cardName: string): Promise<PokemonTCGCard | null> {
+async function searchPokemonTCGApi(cardName: string): Promise<{ rarity: string | null } | null> {
   const headers: Record<string, string> = {};
   const apiKey = process.env.POKEMONTCG_API_KEY;
   if (apiKey) headers["X-Api-Key"] = apiKey;
@@ -71,85 +63,24 @@ async function searchPokemonTCGApi(cardName: string): Promise<PokemonTCGCard | n
   }
 
   if (!card) return null;
-
-  const setName = card.set?.name;
-  const cardNumber = card.number;
-  if (!card.name || !setName || !cardNumber) return null;
-
-  return {
-    name: card.name,
-    setName,
-    cardNumber,
-    rarity: card.rarity ?? null,
-  };
+  return { rarity: card.rarity ?? null };
 }
 
 /**
- * Searches the Pokémon TCG API for `cardName` and, if found, inserts it
- * into the `cards` table (or returns the existing row's id if one
- * already matches by name/set/number). Returns null if the card isn't
- * found on the Pokémon TCG API or the insert fails outright.
+ * Looks up `cardName` on the Pokémon TCG API and, if a rarity is found,
+ * backfills `cards.rarity` for `cardId` -- only when it's still null, so
+ * this never clobbers a value set some other way. No-op (not an error)
+ * when the API has no match or returns no rarity.
  */
-export async function dynamicCardLookup(cardName: string): Promise<string | null> {
-  const supabase = createServiceRoleClient();
-
-  // Already have a row for this name? Don't hit the external API again.
-  const { data: existing } = await supabase
-    .from("cards")
-    .select("id")
-    .ilike("name", cardName)
-    .limit(1)
-    .maybeSingle();
-
-  if (existing) {
-    return existing.id;
-  }
-
-  let apiCard: PokemonTCGCard | null;
+export async function enrichCardFromPokemonTCGApi(cardId: string, cardName: string): Promise<void> {
   try {
-    apiCard = await searchPokemonTCGApi(cardName);
+    const apiCard = await searchPokemonTCGApi(cardName);
+    if (!apiCard?.rarity) return;
+
+    const supabase = createServiceRoleClient();
+    await supabase.from("cards").update({ rarity: apiCard.rarity }).eq("id", cardId).is("rarity", null);
+    console.log(`[enrichCard] backfilled rarity "${apiCard.rarity}" for card ${cardId}`);
   } catch (err) {
-    console.error("[dynamicCardLookup] Pokemon TCG API search failed:", err);
-    return null;
+    console.error("[enrichCard] Pokemon TCG API enrichment failed:", err);
   }
-
-  if (!apiCard) {
-    console.log(`[dynamicCardLookup] no Pokemon TCG API match for "${cardName}"`);
-    return null;
-  }
-
-  const { data: created, error } = await supabase
-    .from("cards")
-    .insert({
-      name: apiCard.name,
-      set_name: apiCard.setName,
-      card_number: apiCard.cardNumber,
-      rarity: apiCard.rarity,
-    })
-    .select("id")
-    .single();
-
-  if (!error && created) {
-    console.log(
-      `[dynamicCardLookup] inserted "${apiCard.name}" (${apiCard.setName} #${apiCard.cardNumber}) as ${created.id}`
-    );
-    return created.id;
-  }
-
-  // Insert failed -- most likely a unique-constraint race with a
-  // concurrent request for the same card. Re-fetch rather than fail.
-  const { data: fallback } = await supabase
-    .from("cards")
-    .select("id")
-    .eq("name", apiCard.name)
-    .eq("set_name", apiCard.setName)
-    .eq("card_number", apiCard.cardNumber)
-    .maybeSingle();
-
-  if (fallback) {
-    return fallback.id;
-  }
-
-  console.error("[dynamicCardLookup] insert failed and no fallback row found:", error?.message);
-  return null;
 }

@@ -67,7 +67,7 @@ def get_cards_to_scrape(
 
         response = (
             client.table("cards")
-            .select("id, name, set_name")
+            .select("id, name, set_name, card_number")
             .range(current_offset, current_offset + remaining - 1)
             .execute()
         )

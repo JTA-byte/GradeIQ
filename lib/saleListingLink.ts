@@ -18,7 +18,7 @@
  *   lib/buySignals.ts), but falls back to the same eBay search rather
  *   than producing a broken link if that ever changes.
  */
-import { ebayGradedSoldListingsUrl } from "./ebayLink";
+import { CardIdentifierLike, ebayGradedSoldListingsUrl } from "./ebayLink";
 
 const GRADE_LABEL_DISPLAY: Record<string, string> = {
   "10": "10",
@@ -33,12 +33,12 @@ export interface SaleListingLinkInput {
   grade: string;
 }
 
-export function buildSaleListingUrl(cardName: string, sale: SaleListingLinkInput): string {
+export function buildSaleListingUrl(card: CardIdentifierLike, sale: SaleListingLinkInput): string {
   if (sale.source === "alt") {
     if (sale.sourceUrl) return sale.sourceUrl;
-    return `https://alt.xyz/browse?${new URLSearchParams({ query: cardName, soldListings: "true" })}`;
+    return `https://alt.xyz/browse?${new URLSearchParams({ query: card.cardName, soldListings: "true" })}`;
   }
 
   const gradeLabel = [sale.grader, GRADE_LABEL_DISPLAY[sale.grade] ?? sale.grade].filter(Boolean).join(" ");
-  return ebayGradedSoldListingsUrl(cardName, gradeLabel);
+  return ebayGradedSoldListingsUrl(card, gradeLabel);
 }

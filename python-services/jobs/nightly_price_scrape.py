@@ -74,7 +74,7 @@ async def _scrape_with_timeout(
 ) -> list[SaleRecord]:
     try:
         return await asyncio.wait_for(
-            scraper.scrape_with_retry(card["name"], card["set_name"]),
+            scraper.scrape_with_retry(card["name"], card["set_name"], card.get("card_number") or ""),
             timeout=PER_CARD_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

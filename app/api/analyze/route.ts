@@ -8,7 +8,8 @@
  * 2. Check scan allowance (free: 3/month, pro: unlimited)
  * 3. Upload up to 10 labeled card images to Supabase Storage
  * 4. Run Claude vision analysis across all images in one call
- * 5. Pull market data + gem rates
+ * 5. Resolve the card's identity (name + set + card number + language)
+ *    to a real cards row, then pull market data + gem rates against it
  * 6. Run ROI engine
  * 7. Save scan record to DB
  * 8. Increment scan counter
@@ -23,8 +24,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { analyzeCardImages, CardImageInput } from "@/lib/visionAnalysis";
-import { getCardMarketData, getCardGemRates, isUnknownCard } from "@/lib/mockDataService";
-import { dynamicCardLookup } from "@/lib/dynamicCardLookup";
+import { getCardMarketData, getCardGemRates } from "@/lib/mockDataService";
+import { CARD_LANGUAGES, CardLanguage, resolveOrCreateCard } from "@/lib/cardIdentifier";
+import { enrichCardFromPokemonTCGApi } from "@/lib/dynamicCardLookup";
 import {
   GRADERS,
   calculateMaxBuyPrice,
@@ -35,6 +37,13 @@ import {
 import { checkScanAllowance, recordScanUsed } from "@/lib/scanGating";
 
 const REQUIRED_LABELS = ["Front Full", "Back Full"];
+
+interface CardIdentifierInput {
+  name?: string;
+  setName?: string;
+  cardNumber?: string;
+  language?: string;
+}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -90,18 +99,33 @@ export async function POST(request: NextRequest) {
     }
 
     // ── 3. Parse request body ────────────────────────────────────────────────
-    let body: { images?: CardImageInput[]; cardName?: string };
+    let body: { images?: CardImageInput[]; card?: CardIdentifierInput };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    const { images, cardName } = body;
+    const { images, card: cardInput } = body;
 
-    if (!images || images.length === 0 || !cardName) {
+    const cardName = cardInput?.name?.trim();
+    const setName = cardInput?.setName?.trim();
+    const cardNumber = cardInput?.cardNumber?.trim();
+    const language = (cardInput?.language?.trim() || "English") as CardLanguage;
+
+    if (!images || images.length === 0 || !cardName || !setName || !cardNumber) {
       return NextResponse.json(
-        { error: "Missing required fields: images and cardName" },
+        {
+          error:
+            "Missing required fields: images, card.name, card.setName, and card.cardNumber are all required",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!CARD_LANGUAGES.includes(language)) {
+      return NextResponse.json(
+        { error: `Invalid card.language "${language}" -- must be one of ${CARD_LANGUAGES.join(", ")}` },
         { status: 400 }
       );
     }
@@ -160,12 +184,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── 6. Market data + gem rates ───────────────────────────────────────────
+    // ── 6. Resolve card identity, then market data + gem rates ───────────────
+    // Matched by name + set + card number + language, not just a bare
+    // name -- see lib/cardIdentifier.ts for why that matters (a name
+    // alone matches too many printings for accurate pricing lookups).
+    let resolvedCard;
+    try {
+      resolvedCard = await resolveOrCreateCard({ name: cardName, setName, cardNumber, language });
+    } catch (err) {
+      return NextResponse.json(
+        { error: `Card identity lookup failed: ${errorMessage(err)}` },
+        { status: 502 }
+      );
+    }
+
     let marketData, gemRates;
     try {
       [marketData, gemRates] = await Promise.all([
-        getCardMarketData(cardName),
-        getCardGemRates(cardName),
+        getCardMarketData({ cardId: resolvedCard.id, cardName, setName, cardNumber }),
+        getCardGemRates(cardName, setName),
       ]);
     } catch (err) {
       return NextResponse.json(
@@ -174,22 +211,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // getCardMarketData() fell back to DEFAULT_PROFILE for this card --
-    // search the Pokemon TCG API and add a real `cards` row for it, so
-    // the nightly Alt.xyz scrape (jobs/nightly_price_scrape.py) picks it
-    // up going forward instead of it being stuck on mock data forever.
-    // Non-fatal and doesn't affect this request's own marketData, which
-    // was already computed above -- see lib/dynamicCardLookup.ts for why
-    // this can't scrape real prices in time for the current response.
-    if (isUnknownCard(cardName)) {
-      try {
-        const newCardId = await dynamicCardLookup(cardName);
-        if (newCardId) {
-          console.log(`[analyze] dynamic card lookup created cards row ${newCardId} for "${cardName}"`);
-        }
-      } catch (err) {
-        console.error("[analyze] dynamic card lookup failed:", err);
-      }
+    // A brand-new cards row has no rarity yet -- best-effort backfill from
+    // the Pokemon TCG API. Non-fatal (enrichCardFromPokemonTCGApi swallows
+    // its own errors) and doesn't affect this request's own marketData,
+    // which was already computed above from the user's own identity
+    // fields regardless of whether this succeeds.
+    if (resolvedCard.isNew) {
+      await enrichCardFromPokemonTCGApi(resolvedCard.id, cardName);
     }
 
     // ── 7. ROI engine ─────────────────────────────────────────────────────────
@@ -241,6 +269,7 @@ export async function POST(request: NextRequest) {
     try {
       await supabase.from("scans").insert({
         user_id: user.id,
+        card_id: resolvedCard.id,
         image_urls: imageUrls,
         vision_centering_pct: centeringPct,
         vision_surface_score: visionResult.surfaceScore,

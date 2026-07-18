@@ -111,8 +111,12 @@ class AltScraper(BaseSaleScraper):
         # User-requested minimum: 1 request per 3 seconds.
         super().__init__(rate_limiter=RateLimiter(min_delay_seconds=3.0))
 
-    async def fetch_sales(self, card_name: str, set_name: str) -> list[SaleRecord]:
-        search_query = f"{set_name} {card_name}".strip()
+    async def fetch_sales(self, card_name: str, set_name: str, card_number: str = "") -> list[SaleRecord]:
+        # {name} {number} {set} -- the card number materially narrows
+        # results (a bare name + set can still match multiple printings:
+        # reprints, promos, or several cards sharing a name within a
+        # set's subsets), so it's included whenever the caller has one.
+        search_query = " ".join(part for part in [card_name, card_number, set_name] if part).strip()
         search_url = (
             f"{self.base_url}/browse?query={quote(search_query)}"
             "&soldListings=true&sortBy=newest_first"

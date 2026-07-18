@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
 
 logging.basicConfig(
@@ -101,13 +102,27 @@ def check_robots_allowed(url: str, user_agent: str = "GradeIQ-Bot") -> bool:
     we respect that and skip -- this matters both ethically and because
     ignoring robots.txt is the kind of thing that gets you a permanent
     IP ban or a cease-and-desist.
+
+    Fetches robots.txt manually with a real User-Agent rather than
+    calling RobotFileParser.read() directly -- confirmed live that
+    pricecharting.com returns a 403 to Python's bare default
+    "Python-urllib/x.y" UA specifically (curl and a real UA both get the
+    actual robots.txt fine). RobotFileParser.read() treats a 401/403 on
+    the robots.txt fetch itself as "disallow everything" rather than
+    raising, so without this fix every pricecharting.com lookup was
+    silently skipped as "robots.txt disallows" even though the real
+    robots.txt (Disallow: /stripe-connect, /publish-offer, /buy only)
+    permits it.
     """
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
     rp = RobotFileParser()
     rp.set_url(robots_url)
     try:
-        rp.read()
+        request = Request(robots_url, headers={"User-Agent": user_agent})
+        with urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        rp.parse(raw.splitlines())
         return rp.can_fetch(user_agent, url)
     except Exception:
         # If robots.txt is unreachable, default to cautious: allow,
@@ -184,15 +199,22 @@ class BaseSaleScraper(ABC):
         self.logger = logging.getLogger(f"scraper.{self.source_name.lower()}")
 
     @abstractmethod
-    async def fetch_sales(self, card_name: str, set_name: str) -> list[SaleRecord]:
-        """Source-specific implementation. Must return a list (empty if not found)."""
+    async def fetch_sales(self, card_name: str, set_name: str, card_number: str = "") -> list[SaleRecord]:
+        """Source-specific implementation. Must return a list (empty if not found).
+
+        `card_number` narrows the search to one specific printing -- a
+        bare name + set can still match multiple cards (reprints, promos,
+        multiple cards sharing a name across a set's subsets), so passing
+        it through to the underlying search query matters for accuracy."""
         raise NotImplementedError
 
-    async def scrape_with_retry(self, card_name: str, set_name: str) -> list[SaleRecord]:
+    async def scrape_with_retry(
+        self, card_name: str, set_name: str, card_number: str = ""
+    ) -> list[SaleRecord]:
         for attempt in range(1, self.max_retries + 1):
             await self.rate_limiter.wait()
             try:
-                results = await self.fetch_sales(card_name, set_name)
+                results = await self.fetch_sales(card_name, set_name, card_number)
                 if results:
                     self.logger.info(f"Scraped {len(results)} sale(s) for {card_name} ({set_name})")
                 else:

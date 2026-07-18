@@ -182,11 +182,13 @@ class PriceChartingScraper(BaseSaleScraper):
             primary_price=median_30 if median_30 is not None else median_90,
         )
 
-    async def fetch_raw_price_summary(self, card_name: str, set_name: str) -> Optional[RawPriceSummary]:
+    async def fetch_raw_price_summary(
+        self, card_name: str, set_name: str, card_number: str = ""
+    ) -> Optional[RawPriceSummary]:
         """Aggregated median-based raw price read -- the entry point for
         anything that wants a single reliable number plus a confidence
         flag, rather than the raw list of individual sales."""
-        query = f"{set_name} {card_name}"
+        query = " ".join(part for part in [card_name, card_number, set_name] if part)
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
             await self.rate_limiter.wait()
@@ -201,7 +203,7 @@ class PriceChartingScraper(BaseSaleScraper):
 
             return self._summarize(sales)
 
-    async def fetch_sales(self, card_name: str, set_name: str) -> list[SaleRecord]:
+    async def fetch_sales(self, card_name: str, set_name: str, card_number: str = "") -> list[SaleRecord]:
         """BaseSaleScraper interface -- individual raw sale records for the
         nightly market_sales population (feeds Buy Signals and the
         graded-sale averaging in lib/tcgplayer.ts's getGradedSalePrices).
@@ -209,7 +211,7 @@ class PriceChartingScraper(BaseSaleScraper):
         math lives in fetch_raw_price_summary() above, which the nightly
         job has no use for since it writes individual rows, not an
         aggregate."""
-        query = f"{set_name} {card_name}"
+        query = " ".join(part for part in [card_name, card_number, set_name] if part)
         cutoff_90 = time.time() - 90 * DAY_SECONDS
 
         async with httpx.AsyncClient(follow_redirects=True) as client:

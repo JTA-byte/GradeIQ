@@ -22,8 +22,10 @@
  * this officially.
  *
  * Caching: results are cached in the `market_prices` table (source =
- * 'tcgplayer', condition = 'raw') for CACHE_TTL_HOURS, keyed off a
- * `cards` row resolved/created by name. The resolved TCGPlayer product ID
+ * 'tcgplayer', condition = 'raw') for CACHE_TTL_HOURS, keyed off the
+ * cardId the caller already resolved via lib/cardIdentifier.ts's
+ * resolveOrCreateCard() (name + set + card number + language, not just a
+ * bare name -- see that file for why). The resolved TCGPlayer product ID
  * is persisted onto `cards.tcgplayer_product_id` so repeat lookups skip
  * the product-search call and go straight to a pricing call.
  *
@@ -131,42 +133,14 @@ async function fetchProductPricing(
   };
 }
 
-interface CardRow {
-  id: string;
-  tcgplayerProductId: number | null;
-}
-
-async function getOrCreateCard(cardName: string): Promise<CardRow> {
+async function getStoredProductId(cardId: string): Promise<number | null> {
   const supabase = createServiceRoleClient();
-
-  const { data: existing } = await supabase
+  const { data } = await supabase
     .from("cards")
-    .select("id, tcgplayer_product_id")
-    .ilike("name", cardName)
-    .limit(1)
+    .select("tcgplayer_product_id")
+    .eq("id", cardId)
     .maybeSingle();
-
-  if (existing) {
-    return {
-      id: existing.id,
-      tcgplayerProductId: existing.tcgplayer_product_id ? Number(existing.tcgplayer_product_id) : null,
-    };
-  }
-
-  // set_name is required by the schema but we only have a free-text card
-  // name from the analyze form -- "Unknown" is a placeholder until the
-  // app collects set/number too.
-  const { data: created, error } = await supabase
-    .from("cards")
-    .insert({ name: cardName, set_name: "Unknown" })
-    .select("id, tcgplayer_product_id")
-    .single();
-
-  if (error || !created) {
-    throw new Error(`Could not find or create a cards row for "${cardName}": ${error?.message}`);
-  }
-
-  return { id: created.id, tcgplayerProductId: null };
+  return data?.tcgplayer_product_id ? Number(data.tcgplayer_product_id) : null;
 }
 
 async function saveResolvedProductId(cardId: string, productId: number): Promise<void> {
@@ -217,18 +191,13 @@ async function cachePrice(cardId: string, pricing: TCGPlayerRawPricing): Promise
  * set, or if the lookup fails/finds nothing -- callers should fall back
  * to mock data in either case.
  */
-export async function getTCGPlayerRawPricing(cardName: string): Promise<TCGPlayerRawPricing | null> {
+export async function getTCGPlayerRawPricing(
+  cardId: string,
+  cardName: string
+): Promise<TCGPlayerRawPricing | null> {
   if (!isConfigured()) return null;
 
-  let card: CardRow;
-  try {
-    card = await getOrCreateCard(cardName);
-  } catch (err) {
-    console.error("[tcgplayer] could not resolve cards row:", err);
-    return null;
-  }
-
-  const cached = await getCachedPrice(card.id);
+  const cached = await getCachedPrice(cardId);
   if (cached) {
     console.log("[tcgplayer] cache hit for", cardName);
     return cached;
@@ -237,11 +206,11 @@ export async function getTCGPlayerRawPricing(cardName: string): Promise<TCGPlaye
   try {
     const token = await getAccessToken();
 
-    let productId = card.tcgplayerProductId;
+    let productId = await getStoredProductId(cardId);
     if (!productId) {
       productId = await searchProductIdByName(cardName, token);
       if (productId) {
-        await saveResolvedProductId(card.id, productId);
+        await saveResolvedProductId(cardId, productId);
       }
     }
 
@@ -253,7 +222,7 @@ export async function getTCGPlayerRawPricing(cardName: string): Promise<TCGPlaye
     const pricing = await fetchProductPricing(productId, token);
     if (!pricing) return null;
 
-    await cachePrice(card.id, pricing);
+    await cachePrice(cardId, pricing);
     console.log("[tcgplayer] live lookup succeeded for", cardName, "-> marketPrice", pricing.marketPrice);
     return pricing;
   } catch (err) {
@@ -301,23 +270,15 @@ async function averageRecentSalePrice(
  * outliers. Returns null for whichever grade has no recent sales --
  * callers should fall back to mock data for those.
  */
-export async function getGradedSalePrices(cardName: string): Promise<GradedSalePrices> {
-  let card: CardRow;
-  try {
-    card = await getOrCreateCard(cardName);
-  } catch (err) {
-    console.error("[tcgplayer] could not resolve cards row for graded sales:", err);
-    return { topGradePrice: null, midGradePrice: null };
-  }
-
+export async function getGradedSalePrices(cardId: string): Promise<GradedSalePrices> {
   const [topGradePrice, midGradePrice] = await Promise.all([
-    averageRecentSalePrice(card.id, "PSA", "10"),
-    averageRecentSalePrice(card.id, "PSA", "9"),
+    averageRecentSalePrice(cardId, "PSA", "10"),
+    averageRecentSalePrice(cardId, "PSA", "9"),
   ]);
 
   console.log(
-    "[tcgplayer] graded sale lookup for",
-    cardName,
+    "[tcgplayer] graded sale lookup for card",
+    cardId,
     "-> PSA10:",
     topGradePrice,
     "| PSA9:",

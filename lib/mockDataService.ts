@@ -111,8 +111,8 @@ function normalizeCardName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-function findProfile(cardName: string): MockCardProfile {
-  const normalized = normalizeCardName(cardName);
+function findProfile(cardName: string, setName: string): MockCardProfile {
+  const normalized = normalizeCardName(`${cardName} ${setName}`);
 
   if (MOCK_CARD_DATABASE[normalized]) {
     return MOCK_CARD_DATABASE[normalized];
@@ -128,29 +128,21 @@ function findProfile(cardName: string): MockCardProfile {
   return DEFAULT_PROFILE;
 }
 
-/**
- * True when `cardName` doesn't match any named mock profile and would
- * fall through to DEFAULT_PROFILE -- i.e. a genuinely unrecognized card,
- * as opposed to one of the four illustrative sample cards above. Used to
- * decide whether to trigger dynamicCardLookup (lib/dynamicCardLookup.ts).
- */
-export function isUnknownCard(cardName: string): boolean {
-  const normalized = normalizeCardName(cardName);
-  if (MOCK_CARD_DATABASE[normalized]) return false;
-  const partialMatch = Object.keys(MOCK_CARD_DATABASE).find(
-    (key) => normalized.includes(key) || key.includes(normalized)
-  );
-  return !partialMatch;
+export interface ResolvedCardInput {
+  cardId: string;
+  cardName: string;
+  setName: string;
+  cardNumber: string;
 }
 
 export async function getCardMarketData(
-  cardName: string,
+  card: ResolvedCardInput,
   shippingRoundTrip: number = 20
 ): Promise<CardMarketData & { priceConfidence: PriceConfidence }> {
-  const profile = findProfile(cardName);
+  const profile = findProfile(card.cardName, card.setName);
   const [live, gradedSales] = await Promise.all([
-    getTCGPlayerRawPricing(cardName),
-    getGradedSalePrices(cardName),
+    getTCGPlayerRawPricing(card.cardId, card.cardName),
+    getGradedSalePrices(card.cardId),
   ]);
 
   const topGradePrice = gradedSales.topGradePrice ?? profile.topGradePrice;
@@ -170,7 +162,7 @@ export async function getCardMarketData(
   // No TCGPlayer keys configured, or the live lookup failed/found nothing --
   // try PriceCharting's real sold-listing medians next, before falling
   // back to mock data.
-  const priceCharting = await getPriceChartingRawPricing(cardName);
+  const priceCharting = await getPriceChartingRawPricing(card.cardName, card.setName, card.cardNumber);
   if (priceCharting && priceCharting.primaryPrice !== null) {
     return {
       rawCost: priceCharting.primaryPrice,
@@ -197,9 +189,9 @@ export async function getCardMarketData(
   };
 }
 
-export async function getCardGemRates(cardName: string): Promise<GemRateData> {
+export async function getCardGemRates(cardName: string, setName: string): Promise<GemRateData> {
   await new Promise((resolve) => setTimeout(resolve, 150));
-  const profile = findProfile(cardName);
+  const profile = findProfile(cardName, setName);
   return profile.gemRates;
 }
 

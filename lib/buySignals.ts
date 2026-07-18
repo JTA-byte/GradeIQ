@@ -101,6 +101,7 @@ export interface BuySignal {
   cardName: string;
   setName: string;
   cardNumber: string | null;
+  language: string;
   bestGrader: GraderId;
   bestGraderName: string;
   targetGradeLabel: string; // e.g. "PSA 10"
@@ -137,6 +138,7 @@ interface CardRow {
   name: string;
   set_name: string;
   card_number: string | null;
+  language: string | null;
 }
 
 interface GemRateRow {
@@ -396,12 +398,37 @@ async function fetchMarketSales(
   }
 }
 
+/**
+ * Same tolerate-missing-column reasoning as fetchMarketSales() above --
+ * `cards.language` is added in supabase/schema.sql but applied to the
+ * live DB by hand, and this query runs on every Buy Signals page load.
+ */
+async function fetchCards(supabase: ReturnType<typeof createServiceRoleClient>): Promise<CardRow[]> {
+  try {
+    return await fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name, card_number, language");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("language")) throw err;
+
+    console.warn(
+      "[buySignals] cards.language doesn't exist yet -- falling back without it. " +
+        "Run the migration in supabase/schema.sql to enable language display."
+    );
+    const rows = await fetchAllRows<Omit<CardRow, "language">>(
+      supabase,
+      "cards",
+      "id, name, set_name, card_number"
+    );
+    return rows.map((r) => ({ ...r, language: null }));
+  }
+}
+
 export async function getBuySignals(): Promise<BuySignal[]> {
   const supabase = createServiceRoleClient();
 
   const [sales, cards, gemRateRows] = await Promise.all([
     fetchMarketSales(supabase),
-    fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name, card_number"),
+    fetchCards(supabase),
     fetchAllRows<GemRateRow>(supabase, "gem_rates", "card_id, grader, total_pop, gem_rate, scraped_at"),
   ]);
 
@@ -477,6 +504,7 @@ export async function getBuySignals(): Promise<BuySignal[]> {
         cardName: card.name,
         setName: card.set_name,
         cardNumber: card.card_number,
+        language: card.language ?? "English",
         bestGrader: best.grader,
         bestGraderName: `${graderConfig.name} ${graderConfig.tier}`,
         targetGradeLabel: best.targetGradeLabel,

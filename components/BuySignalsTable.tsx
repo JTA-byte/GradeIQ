@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { BuySignal, PriceConfidence } from "@/lib/buySignals";
-import { ebayGradedSoldListingsUrl, ebaySoldListingsUrl } from "@/lib/ebayLink";
+import { ebayGradedSoldListingsUrl, ebayRawSoldListingsUrl } from "@/lib/ebayLink";
 import { buildSaleListingUrl } from "@/lib/saleListingLink";
 
 type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice" | "gapDollars";
@@ -224,6 +224,13 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
   const [salesOpen, setSalesOpen] = useState(false);
   const [watchlistState, setWatchlistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
+  const cardIdentifier = {
+    cardName: s.cardName,
+    cardNumber: s.cardNumber,
+    setName: s.setName,
+    language: s.language,
+  };
+
   async function addToWatchlist() {
     setWatchlistState("saving");
     try {
@@ -256,6 +263,8 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           <p className="font-mono text-xs text-slate/70 mt-0.5">
             {s.setName}
             {s.cardNumber && ` #${s.cardNumber}`}
+            {" · "}
+            {s.language}
           </p>
           <p className="font-mono text-xs text-slate mt-1">
             Target: <span className="text-ink font-bold">{s.targetGradeLabel}</span>
@@ -324,7 +333,7 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
               s.recentSales.map((sale, i) => (
                 <a
                   key={i}
-                  href={buildSaleListingUrl(s.cardName, sale)}
+                  href={buildSaleListingUrl(cardIdentifier, sale)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="block font-mono text-xs text-slate hover:text-moss transition-colors underline decoration-dotted underline-offset-2"
@@ -341,7 +350,7 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
       {/* Actions */}
       <div className="flex flex-wrap gap-2 border-t border-line pt-3">
         <a
-          href={ebaySoldListingsUrl(s.cardName)}
+          href={ebayRawSoldListingsUrl(cardIdentifier)}
           target="_blank"
           rel="noopener noreferrer"
           className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
@@ -349,7 +358,7 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           Find raw on eBay
         </a>
         <a
-          href={ebayGradedSoldListingsUrl(s.cardName, s.targetGradeLabel)}
+          href={ebayGradedSoldListingsUrl(cardIdentifier, s.targetGradeLabel)}
           target="_blank"
           rel="noopener noreferrer"
           className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"

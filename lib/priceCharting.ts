@@ -185,24 +185,29 @@ function summarize(sales: { price: number; timestampMs: number }[]): PriceCharti
 const resultCache = new Map<string, { result: PriceChartingRawPricing; fetchedAt: number }>();
 
 /**
- * Looks up a real raw-price read for `cardName` from PriceCharting's
- * individual sold listings (not its own blended "market price"). Returns
- * null if the card can't be found, robots.txt disallows the lookup, or
- * the request fails for any reason -- callers should fall back to mock
- * data or another source in that case.
+ * Looks up a real raw-price read for a card from PriceCharting's
+ * individual sold listings (not its own blended "market price"). Takes
+ * the card's full identity (name + set + card number) rather than just
+ * a name -- a bare name matches too many printings, and including the
+ * card number in the search query helps PriceCharting's own search
+ * disambiguate between them. Returns null if the card can't be found,
+ * robots.txt disallows the lookup, or the request fails for any reason
+ * -- callers should fall back to mock data or another source in that
+ * case.
  */
 export async function getPriceChartingRawPricing(
   cardName: string,
-  setName: string = ""
+  setName: string = "",
+  cardNumber: string = ""
 ): Promise<PriceChartingRawPricing | null> {
-  const cacheKey = `${setName}::${cardName}`.toLowerCase().trim();
+  const cacheKey = `${setName}::${cardName}::${cardNumber}`.toLowerCase().trim();
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
     return cached.result;
   }
 
   try {
-    const query = `${setName} ${cardName}`.trim();
+    const query = `${setName} ${cardName} ${cardNumber}`.trim();
     const productUrl = await findProductUrl(query);
     if (!productUrl) {
       console.log("[pricecharting] no product match for", cardName);

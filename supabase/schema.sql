@@ -12,12 +12,13 @@ create table cards (
   name text not null,
   set_name text not null,
   card_number text,
+  language text not null default 'English' check (language in ('English', 'Japanese', 'Korean', 'Chinese')),
   rarity text,
   release_year int,
   tcgplayer_product_id text,
   image_url text,
   created_at timestamptz default now(),
-  unique (name, set_name, card_number)
+  unique (name, set_name, card_number, language)
 );
 
 create index idx_cards_name on cards using gin (to_tsvector('english', name));
