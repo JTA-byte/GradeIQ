@@ -6,9 +6,11 @@ import { GRADERS, GraderId } from "@/lib/roiEngine";
 export interface PortfolioItem {
   id: string;
   card_name: string;
-  raw_purchase_price: number;
-  date_bought: string;
-  status: "raw" | "submitted" | "graded" | "sold";
+  raw_purchase_price: number | null; // null only while status === "watchlist"
+  date_bought: string | null; // null only while status === "watchlist"
+  status: "watchlist" | "raw" | "submitted" | "graded" | "sold";
+  is_watchlist: boolean;
+  target_price: number | null;
   grader: string | null;
   submission_date: string | null;
   grade_received: string | null;
@@ -17,6 +19,7 @@ export interface PortfolioItem {
 }
 
 const STATUS_STYLE: Record<PortfolioItem["status"], string> = {
+  watchlist: "bg-gold/10 text-ink border border-gold/60",
   raw: "bg-slate/10 text-slate border border-slate/40",
   submitted: "bg-gold/10 text-ink border border-gold",
   graded: "bg-moss/10 text-moss border border-moss",
@@ -29,7 +32,7 @@ function graderConfig(grader: string | null) {
 }
 
 function calculatePnL(item: PortfolioItem): number | null {
-  if (item.status !== "sold" || item.sale_price === null) return null;
+  if (item.status !== "sold" || item.sale_price === null || item.raw_purchase_price === null) return null;
   const config = graderConfig(item.grader);
   const gradingFee = config?.fee ?? 0;
   const platformFee = item.sale_price * (config?.sellPlatformFeePct ?? 0.13);
@@ -241,13 +244,19 @@ function PortfolioItemRow({
   const [submissionDate, setSubmissionDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [gradeReceived, setGradeReceived] = useState("");
   const [salePrice, setSalePrice] = useState("");
+  const [purchasePrice, setPurchasePrice] = useState("");
+  const [purchaseDate, setPurchaseDate] = useState(() => new Date().toISOString().slice(0, 10));
 
   const pnl = calculatePnL(item);
   const returnDate = estimatedReturnDate(item);
   const isOverdue = returnDate !== null && returnDate.getTime() < Date.now();
 
   function submitTransition() {
-    if (item.status === "raw") {
+    if (item.status === "watchlist") {
+      const price = Number(purchasePrice);
+      if (!purchasePrice || Number.isNaN(price) || price <= 0) return;
+      onUpdate({ status: "raw", rawPurchasePrice: price, dateBought: purchaseDate });
+    } else if (item.status === "raw") {
       onUpdate({ status: "submitted", grader, submissionDate });
     } else if (item.status === "submitted") {
       if (!gradeReceived.trim()) return;
@@ -271,10 +280,18 @@ function PortfolioItemRow({
             <h3 className="font-display text-lg">{item.card_name}</h3>
           </div>
           <p className="font-mono text-xs text-slate/70">
-            Bought ${item.raw_purchase_price.toLocaleString()} on {formatDate(item.date_bought)}
-            {item.grader && ` -- ${item.grader}`}
-            {item.submission_date && `, submitted ${formatDate(item.submission_date)}`}
-            {item.grade_received && `, graded ${item.grade_received}`}
+            {item.status === "watchlist" ? (
+              <>
+                Watchlisted{item.target_price !== null && ` -- buy ≤ $${item.target_price.toLocaleString()}`}
+              </>
+            ) : (
+              <>
+                Bought ${item.raw_purchase_price?.toLocaleString()} on {formatDate(item.date_bought!)}
+                {item.grader && ` -- ${item.grader}`}
+                {item.submission_date && `, submitted ${formatDate(item.submission_date)}`}
+                {item.grade_received && `, graded ${item.grade_received}`}
+              </>
+            )}
           </p>
           {returnDate && (
             <p className={`font-mono text-xs mt-1 ${isOverdue ? "text-rust" : "text-slate/60"}`}>
@@ -295,6 +312,7 @@ function PortfolioItemRow({
               onClick={() => setShowTransitionForm((v) => !v)}
               className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
             >
+              {item.status === "watchlist" && "Log purchase"}
               {item.status === "raw" && "Mark submitted"}
               {item.status === "submitted" && "Mark graded"}
               {item.status === "graded" && "Mark sold"}
@@ -311,6 +329,33 @@ function PortfolioItemRow({
 
       {showTransitionForm && (
         <div className="mt-4 pt-4 border-t border-line flex flex-wrap items-end gap-3">
+          {item.status === "watchlist" && (
+            <>
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+                  Purchase price
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={purchasePrice}
+                  onChange={(e) => setPurchasePrice(e.target.value)}
+                  className="border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+                  Date bought
+                </label>
+                <input
+                  type="date"
+                  value={purchaseDate}
+                  onChange={(e) => setPurchaseDate(e.target.value)}
+                  className="border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+                />
+              </div>
+            </>
+          )}
           {item.status === "raw" && (
             <>
               <div>

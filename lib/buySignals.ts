@@ -6,11 +6,15 @@
  * assume): `gem_rates` is currently EMPTY -- the PSA/CGC/BGS/TAG pop
  * scrapers (python-services/scrapers/{psa,cgc,bgs,tag}_scraper.py) were
  * never fixed with real selectors the way alt_scraper.py was, so no pop
- * report has ever actually been written. `market_sales` has real data
- * (12,889 rows across 967 distinct cards at last check), all from
- * Alt.xyz (source 'alt' or 'ebay_sold' comps it aggregates) -- TAG isn't
- * tracked by Alt at all, and SGC sales exist but aren't one of GradeIQ's
- * 4 supported graders, so both are skipped here.
+ * report has ever actually been written. `market_sales` has real graded
+ * data from Alt.xyz (source 'alt' or 'ebay_sold' comps it aggregates) --
+ * TAG isn't tracked by Alt at all, and SGC sales exist but aren't one of
+ * GradeIQ's 4 supported graders, so both are skipped here. As of the
+ * PriceCharting scraper rewrite (see python-services/scrapers/
+ * pricecharting_scraper.py), `market_sales` also gains real *raw*
+ * (grade = 'Raw', grader = null, source = 'pricecharting') sale rows
+ * once the nightly job has run against a card -- rawMarketPrice below
+ * uses those when present instead of an estimate.
  *
  * Practical effect: gemRatePct is 0 for every card today (there's
  * nothing real to report), and pop growth has no history to compute
@@ -20,13 +24,12 @@
  * not a bug -- scores will improve in signal quality as real pop data
  * starts flowing in, same as the rest of this app's mock-to-real story.
  *
- * Raw/ungraded price is also not scraped anywhere yet (Alt only records
- * graded sales; point130/pricecharting are disabled in the nightly job).
- * Rather than call the real TCGPlayer client once per candidate card
- * (967+ external API calls per page load isn't practical, unlike the
- * single-card analyze flow in lib/mockDataService.ts, which still does
- * exactly that), this estimates raw price as a fraction of top-grade
- * price -- a clearly-labeled placeholder, not scraped data.
+ * Raw/ungraded price falls back to an estimated fraction of top-grade
+ * price (clearly flagged via isRawPriceEstimated) only when no real
+ * PriceCharting raw sales exist yet for a card -- rather than call the
+ * live TCGPlayer/PriceCharting clients once per candidate card (967+
+ * external calls per page load isn't practical, unlike the single-card
+ * analyze flow in lib/mockDataService.ts, which still does exactly that).
  */
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import {
@@ -53,27 +56,69 @@ const UNSCANNED_VISION_SCORE = 7.5;
 const TOP_GRADE_LABELS = new Set(["10", "PRI", "BL"]);
 const MID_GRADE_LABELS = new Set(["9.5", "9"]);
 
-// No real raw-price source is scraped yet (see file header) -- these
-// ratios are a placeholder estimate, not observed data.
+// How a raw grade-label maps to a human-readable target grade, e.g.
+// "PSA 10", "CGC Pristine", "BGS Black Label".
+const GRADE_LABEL_DISPLAY: Record<string, string> = {
+  "10": "10",
+  PRI: "Pristine",
+  BL: "Black Label",
+};
+
+const SOURCE_DISPLAY: Record<string, string> = {
+  ebay_sold: "eBay",
+  alt: "Alt.xyz",
+  pricecharting: "PriceCharting",
+};
+
+// Used only when no real PriceCharting raw sales exist yet for a card.
 const ESTIMATED_RAW_TO_TOP_GRADE_RATIO = 0.15;
 const ESTIMATED_MID_TO_TOP_GRADE_RATIO_FALLBACK = 0.4;
 
 const DEFAULT_SHIPPING_ROUND_TRIP = 20;
 
+// Confidence thresholds for how many target-grade sales back a signal's
+// numbers, within the last 90 days -- same shape as PriceCharting's own
+// raw-price confidence scale (lib/priceCharting.ts), applied here to
+// graded sale volume instead.
+const LOW_VOLUME_THRESHOLD = 5;
+const HIGH_CONFIDENCE_THRESHOLD = 10;
+const RECENT_SALE_WINDOW_DAYS = 90;
+
+export type PriceConfidence = "high" | "medium" | "low";
+
+export interface RecentSaleDisplay {
+  grader: string | null; // null for a raw (ungraded) sale
+  grade: string;
+  price: number;
+  date: string; // ISO date
+  source: string; // 'ebay_sold' | 'pricecharting' | 'alt'
+  sourceLabel: string; // human-readable, e.g. "Alt.xyz"
+}
+
 export interface BuySignal {
   cardId: string;
   cardName: string;
   setName: string;
+  cardNumber: string | null;
   bestGrader: GraderId;
   bestGraderName: string;
+  targetGradeLabel: string; // e.g. "PSA 10"
   iqScore: number;
   iqLabel: IQScoreLabel;
   iqReason: string;
+  whyReason: string;
   expectedRoiPct: number;
   maxBuyPrice: number;
   gemRatePct: number; // 0 today -- see file header
+  rawMarketPrice: number;
+  isRawPriceEstimated: boolean;
   topGradePrice: number;
-  saleCount: number; // how many real top-grade sales this estimate rests on
+  gapDollars: number;
+  saleCount: number; // how many real top-grade sales this estimate rests on (all-time)
+  recentSaleCount90d: number;
+  priceConfidence: PriceConfidence;
+  lastSaleDate: string | null;
+  recentSales: RecentSaleDisplay[];
 }
 
 interface MarketSaleRow {
@@ -82,12 +127,14 @@ interface MarketSaleRow {
   grade: string;
   sale_price: number;
   sale_date: string;
+  source: string;
 }
 
 interface CardRow {
   id: string;
   name: string;
   set_name: string;
+  card_number: string | null;
 }
 
 interface GemRateRow {
@@ -127,6 +174,12 @@ function average(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
+function mostFrequent(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 function groupBy<T, K>(items: T[], keyFn: (item: T) => K): Map<K, T[]> {
   const map = new Map<K, T[]>();
   for (const item of items) {
@@ -141,6 +194,32 @@ function groupBy<T, K>(items: T[], keyFn: (item: T) => K): Map<K, T[]> {
   return map;
 }
 
+function buildWhyReason(params: {
+  cardName: string;
+  setName: string;
+  gemRatePct: number;
+  targetGradeLabel: string;
+  gapDollars: number;
+  graderName: string;
+  fee: number;
+  expectedRoiPct: number;
+}): string {
+  const { cardName, setName, gemRatePct, targetGradeLabel, gapDollars, graderName, fee, expectedRoiPct } =
+    params;
+
+  // Only cite a gem rate when there's a real one to cite -- gem_rates is
+  // empty today (see file header), and a fabricated "0% gem rate" clause
+  // would read like a real, bad number rather than "we have no data yet".
+  const gemClause = gemRatePct > 0 ? ` a ${gemRatePct.toFixed(0)}% ${targetGradeLabel} gem rate and` : "";
+
+  return (
+    `${cardName} from ${setName} has${gemClause} a $${Math.round(gapDollars).toLocaleString()} ` +
+    `raw-to-${targetGradeLabel} gap. ${graderName} fees of $${fee} and a ` +
+    `${expectedRoiPct >= 0 ? "+" : ""}${expectedRoiPct.toFixed(0)}% expected net ROI make this one of the ` +
+    `stronger opportunities in today's signals.`
+  );
+}
+
 /**
  * For one card's sales from one grader, estimates market data + gem rate
  * + IQ score for that grader, or returns null if there isn't enough data
@@ -150,16 +229,22 @@ function evaluateCardForGrader(
   graderCode: string,
   graderSales: MarketSaleRow[],
   gemRateRow: GemRateRow | undefined,
-  popHistory: PopPoint[]
+  popHistory: PopPoint[],
+  realRawMarketPrice: number | null
 ): {
   grader: GraderId;
+  targetGradeLabel: string;
   roiPct: number;
   maxBuyPrice: number;
   iqScore: number;
   iqLabel: IQScoreLabel;
   iqReason: string;
   topGradePrice: number;
+  rawMarketPrice: number;
+  isRawPriceEstimated: boolean;
   saleCount: number;
+  recentSaleCount90d: number;
+  lastSaleDate: string | null;
 } | null {
   const graderConfig = GRADERS.find((g) => g.id === graderCode.toLowerCase());
   if (!graderConfig) return null; // not one of GradeIQ's 4 supported graders (e.g. SGC)
@@ -171,8 +256,12 @@ function evaluateCardForGrader(
 
   const topGradePrice = average(topSales.map((s) => s.sale_price));
   const midGradePrice =
-    midSales.length > 0 ? average(midSales.map((s) => s.sale_price)) : topGradePrice * ESTIMATED_MID_TO_TOP_GRADE_RATIO_FALLBACK;
-  const rawMarketPrice = topGradePrice * ESTIMATED_RAW_TO_TOP_GRADE_RATIO;
+    midSales.length > 0
+      ? average(midSales.map((s) => s.sale_price))
+      : topGradePrice * ESTIMATED_MID_TO_TOP_GRADE_RATIO_FALLBACK;
+
+  const isRawPriceEstimated = realRawMarketPrice === null;
+  const rawMarketPrice = realRawMarketPrice ?? topGradePrice * ESTIMATED_RAW_TO_TOP_GRADE_RATIO;
   const rawCost = rawMarketPrice * 0.85;
 
   const gemRatePct = gemRateRow?.gem_rate ?? 0;
@@ -226,16 +315,41 @@ function evaluateCardForGrader(
     popHistory,
   });
 
+  const now = Date.now();
+  const recentSaleCount90d = topSales.filter(
+    (s) => now - new Date(s.sale_date).getTime() <= RECENT_SALE_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).length;
+
+  const lastSaleDate =
+    topSales.length > 0
+      ? topSales.reduce((latest, s) => (s.sale_date > latest ? s.sale_date : latest), topSales[0].sale_date)
+      : null;
+
+  const targetGradeLabel = `${graderConfig.name} ${
+    GRADE_LABEL_DISPLAY[mostFrequent(topSales.map((s) => s.grade))] ?? topSales[0].grade
+  }`;
+
   return {
     grader: graderConfig.id,
+    targetGradeLabel,
     roiPct,
     maxBuyPrice,
     iqScore: iq.score,
     iqLabel: iq.label,
     iqReason: iq.reason,
     topGradePrice,
+    rawMarketPrice,
+    isRawPriceEstimated,
     saleCount: topSales.length,
+    recentSaleCount90d,
+    lastSaleDate,
   };
+}
+
+function confidenceFor(recentSaleCount90d: number): PriceConfidence {
+  if (recentSaleCount90d < LOW_VOLUME_THRESHOLD) return "low";
+  if (recentSaleCount90d < HIGH_CONFIDENCE_THRESHOLD) return "medium";
+  return "high";
 }
 
 /**
@@ -248,8 +362,12 @@ export async function getBuySignals(): Promise<BuySignal[]> {
   const supabase = createServiceRoleClient();
 
   const [sales, cards, gemRateRows] = await Promise.all([
-    fetchAllRows<MarketSaleRow>(supabase, "market_sales", "card_id, grader, grade, sale_price, sale_date"),
-    fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name"),
+    fetchAllRows<MarketSaleRow>(
+      supabase,
+      "market_sales",
+      "card_id, grader, grade, sale_price, sale_date, source"
+    ),
+    fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name, card_number"),
     fetchAllRows<GemRateRow>(supabase, "gem_rates", "card_id, grader, total_pop, gem_rate, scraped_at"),
   ]);
 
@@ -274,7 +392,11 @@ export async function getBuySignals(): Promise<BuySignal[]> {
     const card = cardById.get(cardId);
     if (!card) continue;
 
-    const salesByGrader = groupBy(cardSales, (s) => s.grader ?? "UNKNOWN");
+    const rawSales = cardSales.filter((s) => s.grade === "Raw");
+    const realRawMarketPrice = rawSales.length > 0 ? average(rawSales.map((s) => s.sale_price)) : null;
+
+    const gradedSales = cardSales.filter((s) => s.grade !== "Raw");
+    const salesByGrader = groupBy(gradedSales, (s) => s.grader ?? "UNKNOWN");
 
     let best: ReturnType<typeof evaluateCardForGrader> = null;
 
@@ -289,7 +411,8 @@ export async function getBuySignals(): Promise<BuySignal[]> {
         graderCode,
         graderSales,
         latestGemRateByCardGrader.get(gemRateKey),
-        popHistory
+        popHistory,
+        realRawMarketPrice
       );
 
       if (evaluated && (!best || evaluated.iqScore > best.iqScore)) {
@@ -299,20 +422,54 @@ export async function getBuySignals(): Promise<BuySignal[]> {
 
     if (best) {
       const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
+      const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
+      const gapDollars = best.topGradePrice - best.rawMarketPrice;
+
+      const recentSales: RecentSaleDisplay[] = [...gradedSales]
+        .sort((a, b) => new Date(b.sale_date).getTime() - new Date(a.sale_date).getTime())
+        .slice(0, 5)
+        .map((s) => ({
+          grader: s.grader,
+          grade: s.grade,
+          price: s.sale_price,
+          date: s.sale_date,
+          source: s.source,
+          sourceLabel: SOURCE_DISPLAY[s.source] ?? s.source,
+        }));
+
       signals.push({
         cardId,
         cardName: card.name,
         setName: card.set_name,
+        cardNumber: card.card_number,
         bestGrader: best.grader,
         bestGraderName: `${graderConfig.name} ${graderConfig.tier}`,
+        targetGradeLabel: best.targetGradeLabel,
         iqScore: best.iqScore,
         iqLabel: best.iqLabel,
         iqReason: best.iqReason,
+        whyReason: buildWhyReason({
+          cardName: card.name,
+          setName: card.set_name,
+          gemRatePct,
+          targetGradeLabel: best.targetGradeLabel,
+          gapDollars,
+          graderName: `${graderConfig.name} ${graderConfig.tier}`,
+          fee: graderConfig.fee,
+          expectedRoiPct: Math.round(best.roiPct * 10) / 10,
+        }),
         expectedRoiPct: Math.round(best.roiPct * 10) / 10,
         maxBuyPrice: best.maxBuyPrice,
-        gemRatePct: latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0,
+        gemRatePct,
+        rawMarketPrice: Math.round(best.rawMarketPrice * 100) / 100,
+        isRawPriceEstimated: best.isRawPriceEstimated,
         topGradePrice: Math.round(best.topGradePrice * 100) / 100,
+        gapDollars: Math.round(gapDollars * 100) / 100,
         saleCount: best.saleCount,
+        recentSaleCount90d: best.recentSaleCount90d,
+        priceConfidence: confidenceFor(best.recentSaleCount90d),
+        lastSaleDate: best.lastSaleDate,
+        recentSales,
       });
     }
   }

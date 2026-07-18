@@ -18,11 +18,16 @@ function errorMessage(err: unknown): string {
 }
 
 interface PortfolioItemUpdate {
-  status?: "raw" | "submitted" | "graded" | "sold";
+  status?: "watchlist" | "raw" | "submitted" | "graded" | "sold";
   grader?: "PSA" | "CGC" | "BGS" | "TAG";
   submissionDate?: string;
   gradeReceived?: string;
   salePrice?: number;
+  // Only used for the watchlist -> raw transition ("log a purchase" on a
+  // previously-watchlisted target card) -- these fill in the fields a
+  // watchlist row was created without.
+  rawPurchasePrice?: number;
+  dateBought?: string;
 }
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
@@ -49,6 +54,11 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     if (body.submissionDate !== undefined) update.submission_date = body.submissionDate;
     if (body.gradeReceived !== undefined) update.grade_received = body.gradeReceived;
     if (body.salePrice !== undefined) update.sale_price = body.salePrice;
+    if (body.rawPurchasePrice !== undefined) update.raw_purchase_price = body.rawPurchasePrice;
+    if (body.dateBought !== undefined) update.date_bought = body.dateBought;
+    // Logging a purchase against a watchlist row also clears is_watchlist
+    // -- it's a real owned card now, not just a target.
+    if (body.status === "raw" && body.rawPurchasePrice !== undefined) update.is_watchlist = false;
 
     if (Object.keys(update).length === 0) {
       return NextResponse.json({ error: "No fields to update" }, { status: 400 });

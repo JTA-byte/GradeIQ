@@ -50,16 +50,65 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    let body: { cardName?: string; rawPurchasePrice?: number; dateBought?: string };
+    let body: {
+      cardName?: string;
+      rawPurchasePrice?: number;
+      dateBought?: string;
+      isWatchlist?: boolean;
+      targetPrice?: number;
+    };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    const { cardName, rawPurchasePrice, dateBought } = body;
+    const { cardName, rawPurchasePrice, dateBought, isWatchlist, targetPrice } = body;
 
-    if (!cardName || typeof rawPurchasePrice !== "number" || !dateBought) {
+    if (!cardName) {
+      return NextResponse.json({ error: "Missing required field: cardName" }, { status: 400 });
+    }
+
+    // A watchlist entry (from Buy Signals' "Add to watchlist") is a
+    // target card the user hasn't bought yet -- no raw_purchase_price/
+    // date_bought to record, since fabricating those would misrepresent
+    // a target as an actual purchase. Requires the schema migration in
+    // supabase/schema.sql's portfolio_items table (is_watchlist,
+    // target_price, nullable raw_purchase_price/date_bought) to be
+    // applied to the live DB first.
+    let insertPayload: {
+      user_id: string;
+      card_name: string;
+      status: string;
+      is_watchlist: boolean;
+      target_price: number | null;
+      raw_purchase_price: number | null;
+      date_bought: string | null;
+    } | null = null;
+
+    if (isWatchlist) {
+      insertPayload = {
+        user_id: user.id,
+        card_name: cardName,
+        status: "watchlist",
+        is_watchlist: true,
+        target_price: typeof targetPrice === "number" ? targetPrice : null,
+        raw_purchase_price: null,
+        date_bought: null,
+      };
+    } else if (typeof rawPurchasePrice === "number" && dateBought) {
+      insertPayload = {
+        user_id: user.id,
+        card_name: cardName,
+        status: "raw",
+        is_watchlist: false,
+        target_price: null,
+        raw_purchase_price: rawPurchasePrice,
+        date_bought: dateBought,
+      };
+    }
+
+    if (!insertPayload) {
       return NextResponse.json(
         { error: "Missing required fields: cardName, rawPurchasePrice, dateBought" },
         { status: 400 }
@@ -68,13 +117,7 @@ export async function POST(request: NextRequest) {
 
     const { data, error } = await supabase
       .from("portfolio_items")
-      .insert({
-        user_id: user.id,
-        card_name: cardName,
-        raw_purchase_price: rawPurchasePrice,
-        date_bought: dateBought,
-        status: "raw",
-      })
+      .insert(insertPayload)
       .select()
       .single();
 

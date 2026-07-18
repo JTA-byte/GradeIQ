@@ -1,17 +1,30 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { BuySignal } from "@/lib/buySignals";
-import { ebaySoldListingsUrl } from "@/lib/ebayLink";
+import type { BuySignal, PriceConfidence } from "@/lib/buySignals";
+import { ebayGradedSoldListingsUrl, ebaySoldListingsUrl } from "@/lib/ebayLink";
 
-type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice";
+type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice" | "gapDollars";
 
-const IQ_LABEL_STYLE: Record<BuySignal["iqLabel"], string> = {
-  Excellent: "bg-moss text-paper",
-  Strong: "bg-moss/20 text-moss border border-moss",
-  Moderate: "bg-gold/20 text-ink border border-gold",
-  Weak: "bg-rust/10 text-rust border border-rust",
+function iqScoreColor(score: number): string {
+  if (score >= 70) return "bg-moss text-paper";
+  if (score >= 50) return "bg-gold/30 text-ink border border-gold";
+  return "bg-rust/10 text-rust border border-rust";
+}
+
+const CONFIDENCE_STYLE: Record<PriceConfidence, string> = {
+  high: "bg-moss/20 text-moss border border-moss",
+  medium: "bg-gold/20 text-ink border border-gold",
+  low: "bg-rust/10 text-rust border border-rust",
 };
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function formatFullDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
 
 export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
   const [minIq, setMinIq] = useState(0);
@@ -37,8 +50,31 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
       .sort((a, b) => b[sortKey] - a[sortKey]);
   }, [signals, minIq, maxIq, graderFilter, setFilter, sortKey]);
 
+  const summary = useMemo(() => {
+    if (signals.length === 0) return null;
+    const avgGap = signals.reduce((sum, s) => sum + s.gapDollars, 0) / signals.length;
+    const best = signals.reduce((a, b) => (b.iqScore > a.iqScore ? b : a));
+    return { count: signals.length, avgGap, bestName: best.cardName };
+  }, [signals]);
+
   return (
     <div>
+      <HowToUseSection />
+
+      {summary && (
+        <div className="mb-6 border border-line bg-white/40 p-4 font-mono text-xs text-slate flex flex-wrap gap-x-6 gap-y-2">
+          <span>
+            <span className="text-ink font-bold">{summary.count}</span> cards analyzed
+          </span>
+          <span>
+            Average gap: <span className="text-ink font-bold">${Math.round(summary.avgGap).toLocaleString()}</span>
+          </span>
+          <span>
+            Best opportunity: <span className="text-ink font-bold">{summary.bestName}</span>
+          </span>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex flex-wrap items-end gap-4 mb-6 border border-line bg-white/40 p-4">
         <div>
@@ -111,6 +147,7 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
             className="border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
           >
             <option value="iqScore">IQ score</option>
+            <option value="gapDollars">Price gap</option>
             <option value="expectedRoiPct">Expected ROI%</option>
             <option value="maxBuyPrice">Max buy price</option>
           </select>
@@ -120,74 +157,211 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
         </span>
       </div>
 
-      {/* Table */}
-      <div className="overflow-x-auto border border-line">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-white/60 border-b border-line font-mono text-[10px] uppercase tracking-widest text-slate/70">
-              <th className="text-left px-4 py-3">IQ score</th>
-              <th className="text-left px-4 py-3">Card</th>
-              <th className="text-left px-4 py-3">Set</th>
-              <th className="text-left px-4 py-3">Best grader</th>
-              <th className="text-right px-4 py-3">Expected ROI%</th>
-              <th className="text-right px-4 py-3">Max buy price</th>
-              <th className="text-right px-4 py-3"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((s) => (
-              <tr key={`${s.cardId}-${s.bestGrader}`} className="border-b border-line last:border-0">
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <span className={`font-mono text-xs px-2 py-0.5 ${IQ_LABEL_STYLE[s.iqLabel]}`}>
-                      {s.iqScore}
-                    </span>
-                    <span className="font-mono text-[10px] text-slate/60 hidden sm:inline">
-                      {s.iqLabel}
-                    </span>
-                  </div>
-                  <p
-                    className="font-mono text-[10px] text-slate/50 mt-1 max-w-[220px] truncate"
-                    title={s.iqReason}
-                  >
-                    {s.iqReason}
-                  </p>
-                </td>
-                <td className="px-4 py-3 font-display text-base">{s.cardName}</td>
-                <td className="px-4 py-3 font-mono text-xs text-slate">{s.setName}</td>
-                <td className="px-4 py-3 font-mono text-xs">{s.bestGraderName}</td>
-                <td
-                  className={`px-4 py-3 text-right font-mono text-sm ${
-                    s.expectedRoiPct >= 0 ? "text-moss" : "text-rust"
-                  }`}
-                >
-                  {s.expectedRoiPct >= 0 ? "+" : ""}
-                  {s.expectedRoiPct}%
-                </td>
-                <td className="px-4 py-3 text-right font-mono text-sm">
-                  ${s.maxBuyPrice.toLocaleString()}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <a
-                    href={ebaySoldListingsUrl(s.cardName)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-mono text-[10px] uppercase tracking-widest border border-line px-2 py-1 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
-                  >
-                    Find on eBay
-                  </a>
-                </td>
-              </tr>
-            ))}
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-4 py-10 text-center font-mono text-sm text-slate/60">
-                  No cards match these filters.
-                </td>
-              </tr>
+      {/* Card grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {filtered.map((s) => (
+          <BuySignalCard key={`${s.cardId}-${s.bestGrader}`} signal={s} />
+        ))}
+        {filtered.length === 0 && (
+          <div className="lg:col-span-2 border border-line p-10 text-center font-mono text-sm text-slate/60">
+            No cards match these filters.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HowToUseSection() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="mb-6 border border-line bg-white/40">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 font-mono text-xs uppercase tracking-widest text-slate hover:text-moss transition-colors"
+      >
+        How to use Buy Signals
+        <span className="font-mono text-sm">{open ? "−" : "+"}</span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-3 font-body text-sm text-slate leading-relaxed border-t border-line pt-3">
+          <p>
+            <span className="font-display text-ink">IQ Score</span> is a single 0-100 signal blending gem
+            rate, expected net ROI, recent sale-price momentum, and pop growth. Higher is a stronger
+            opportunity right now:{" "}
+            <span className="text-moss font-mono">70+ green</span>,{" "}
+            <span className="text-ink font-mono">50-69 yellow</span>,{" "}
+            <span className="text-rust font-mono">below 50 orange</span>.
+          </p>
+          <p>
+            <span className="font-display text-ink">Max Buy Price</span> is the most you could pay for a
+            raw copy and still hit a solid net ROI target with the recommended grader, after subtracting
+            grading fees, shipping, and platform fees from the expected graded sale price. Paying more than
+            this erodes the opportunity.
+          </p>
+          <p>
+            <span className="font-display text-ink">Price confidence</span> reflects how many real sales
+            back a card&apos;s numbers in the last 90 days: <span className="text-moss">High</span> (10+
+            sales), <span className="text-ink">Medium</span> (5-9 sales), or{" "}
+            <span className="text-rust">Low</span> (under 5 sales -- treat the price as a rough estimate,
+            not a firm number).
+          </p>
+          <p>
+            <span className="font-display text-ink">Acting on a signal:</span> find a raw copy at or below
+            the Max Buy Price, confirm its condition matches what the target grade needs, then send it to
+            the recommended grader. The gap and confidence badge tell you how much conviction to have
+            before you commit money.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BuySignalCard({ signal: s }: { signal: BuySignal }) {
+  const [salesOpen, setSalesOpen] = useState(false);
+  const [watchlistState, setWatchlistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  async function addToWatchlist() {
+    setWatchlistState("saving");
+    try {
+      const res = await fetch("/api/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cardName: s.cardName,
+          isWatchlist: true,
+          targetPrice: s.maxBuyPrice,
+        }),
+      });
+      if (res.status === 401) {
+        window.location.href = "/auth/login";
+        return;
+      }
+      if (!res.ok) throw new Error("failed");
+      setWatchlistState("saved");
+    } catch {
+      setWatchlistState("error");
+    }
+  }
+
+  return (
+    <div className="border border-line bg-white/40 p-5 flex flex-col gap-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="font-display text-2xl leading-tight">{s.cardName}</h3>
+          <p className="font-mono text-xs text-slate/70 mt-0.5">
+            {s.setName}
+            {s.cardNumber && ` #${s.cardNumber}`}
+          </p>
+          <p className="font-mono text-xs text-slate mt-1">
+            Target: <span className="text-ink font-bold">{s.targetGradeLabel}</span>
+          </p>
+        </div>
+        <span className={`font-mono text-sm font-bold px-2.5 py-1 whitespace-nowrap ${iqScoreColor(s.iqScore)}`}>
+          {s.iqScore}
+        </span>
+      </div>
+
+      {/* Price context row */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-slate/60">Raw</div>
+          <div className="font-display text-lg">
+            ~${Math.round(s.rawMarketPrice).toLocaleString()}
+            {s.isRawPriceEstimated && <span className="font-mono text-[9px] text-slate/50 ml-1">est.</span>}
+          </div>
+        </div>
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-slate/60">
+            {s.targetGradeLabel} avg
+          </div>
+          <div className="font-display text-lg">${Math.round(s.topGradePrice).toLocaleString()}</div>
+        </div>
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-slate/60">Gap</div>
+          <div className="font-display text-lg text-moss">+${Math.round(s.gapDollars).toLocaleString()}</div>
+        </div>
+        <div className="border-2 border-ink px-2 py-1 flex flex-col justify-center">
+          <div className="font-mono text-[9px] uppercase tracking-widest text-slate/60">Buy ≤</div>
+          <div className="font-display text-xl">${Math.round(s.maxBuyPrice).toLocaleString()}</div>
+        </div>
+      </div>
+
+      {/* Signal quality row */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-slate/70 border-t border-line pt-3">
+        <span>
+          Based on {s.recentSaleCount90d} sale{s.recentSaleCount90d === 1 ? "" : "s"}, last 90 days
+        </span>
+        <span className={`px-2 py-0.5 uppercase tracking-widest text-[10px] ${CONFIDENCE_STYLE[s.priceConfidence]}`}>
+          {s.priceConfidence}
+        </span>
+        {s.lastSaleDate && <span>Last sold {formatDate(s.lastSaleDate)}</span>}
+      </div>
+
+      {/* Why this card */}
+      <p className="font-body text-sm text-slate leading-relaxed border-t border-line pt-3">{s.whyReason}</p>
+
+      {/* Recent graded sales */}
+      <div className="border-t border-line pt-3">
+        <button
+          onClick={() => setSalesOpen((v) => !v)}
+          className="w-full flex items-center justify-between font-mono text-[10px] uppercase tracking-widest text-slate hover:text-moss transition-colors"
+        >
+          Recent Sales ({s.recentSales.length})
+          <span className="font-mono text-sm">{salesOpen ? "−" : "+"}</span>
+        </button>
+        {salesOpen && (
+          <div className="mt-2 space-y-1.5">
+            {s.recentSales.length === 0 ? (
+              <p className="font-mono text-xs text-slate/60">
+                No recent sales data -- check back after tonight&apos;s scrape.
+              </p>
+            ) : (
+              s.recentSales.map((sale, i) => (
+                <p key={i} className="font-mono text-xs text-slate">
+                  {sale.grader ? `${sale.grader} ${sale.grade}` : "Raw"} — $
+                  {sale.price.toLocaleString()} — {formatFullDate(sale.date)} — {sale.sourceLabel}
+                </p>
+              ))
             )}
-          </tbody>
-        </table>
+          </div>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex flex-wrap gap-2 border-t border-line pt-3">
+        <a
+          href={ebaySoldListingsUrl(s.cardName)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+        >
+          Find raw on eBay
+        </a>
+        <a
+          href={ebayGradedSoldListingsUrl(s.cardName, s.targetGradeLabel)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+        >
+          Find graded on eBay
+        </a>
+        <button
+          onClick={addToWatchlist}
+          disabled={watchlistState === "saving" || watchlistState === "saved"}
+          className="font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-1.5 hover:bg-moss transition-colors disabled:opacity-50"
+        >
+          {watchlistState === "saved"
+            ? "Added to watchlist"
+            : watchlistState === "saving"
+              ? "Adding..."
+              : watchlistState === "error"
+                ? "Failed -- retry"
+                : "Add to watchlist"}
+        </button>
       </div>
     </div>
   );

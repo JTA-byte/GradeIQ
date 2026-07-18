@@ -150,10 +150,17 @@ create table portfolio_items (
   user_id uuid references auth.users(id) not null,
 
   card_name text not null,
-  raw_purchase_price numeric not null,
-  date_bought date not null,
+  raw_purchase_price numeric, -- null only for a watchlist item (not bought yet)
+  date_bought date,           -- null only for a watchlist item (not bought yet)
 
-  status text not null default 'raw' check (status in ('raw', 'submitted', 'graded', 'sold')),
+  -- 'watchlist' is a target card added from Buy Signals ("Add to
+  -- watchlist"), not an actual purchase -- it has no raw_purchase_price/
+  -- date_bought yet. target_price holds the max buy price it was
+  -- watchlisted at. Converting a watchlist item into a real purchase
+  -- moves it to 'raw' and fills in raw_purchase_price/date_bought.
+  status text not null default 'raw' check (status in ('watchlist', 'raw', 'submitted', 'graded', 'sold')),
+  is_watchlist boolean not null default false,
+  target_price numeric, -- max buy price at the time this was watchlisted; null for normal adds
 
   grader text check (grader in ('PSA', 'CGC', 'BGS', 'TAG')), -- null until submitted
   submission_date date,                                        -- null until submitted
@@ -161,7 +168,10 @@ create table portfolio_items (
   sale_price numeric,                                          -- null until sold
 
   created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  updated_at timestamptz default now(),
+
+  constraint portfolio_items_purchase_fields_check
+    check (status = 'watchlist' or (raw_purchase_price is not null and date_bought is not null))
 );
 
 create index idx_portfolio_items_user on portfolio_items (user_id, created_at desc);
