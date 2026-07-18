@@ -28,3 +28,4 @@ python-services/.env
 
 # generated data exports
 supabase/cards_export.xlsx
+/cards_export.xlsx
