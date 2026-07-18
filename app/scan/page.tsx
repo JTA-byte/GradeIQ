@@ -7,6 +7,7 @@ import { GraderSlab } from "@/components/GraderSlab";
 import type { FullRecommendation } from "@/lib/roiEngine";
 import { ebayRawSoldListingsUrl } from "@/lib/ebayLink";
 import { CARD_LANGUAGES, CardLanguage } from "@/lib/cardLanguage";
+import { CARD_VARIANTS, CardVariant, variantDetailLabel, variantNeedsDetail } from "@/lib/cardVariant";
 
 interface CardSuggestion {
   id: string;
@@ -14,6 +15,8 @@ interface CardSuggestion {
   set_name: string;
   card_number: string | null;
   language: string | null;
+  variant: string | null;
+  variant_detail: string | null;
 }
 
 interface SlotDef {
@@ -154,6 +157,8 @@ export default function ScanPage() {
   const [cardName, setCardName] = useState("");
   const [setName, setSetName] = useState("");
   const [cardNumber, setCardNumber] = useState("");
+  const [variant, setVariant] = useState<CardVariant>("Normal");
+  const [variantDetail, setVariantDetail] = useState("");
   const [language, setLanguage] = useState<CardLanguage>("English");
   const [suggestions, setSuggestions] = useState<CardSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -164,7 +169,10 @@ export default function ScanPage() {
   const [result, setResult] = useState<AnalysisResponse | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const hasRequiredCardFields = Boolean(cardName.trim() && setName.trim() && cardNumber.trim());
+  const needsVariantDetail = variantNeedsDetail(variant);
+  const hasRequiredCardFields = Boolean(
+    cardName.trim() && setName.trim() && cardNumber.trim() && (!needsVariantDetail || variantDetail.trim())
+  );
 
   // Debounced autocomplete: look up matching cards as the user types a
   // name/set, so they can pick the exact printing (and auto-fill its
@@ -204,6 +212,10 @@ export default function ScanPage() {
     if (suggestion.language && (CARD_LANGUAGES as string[]).includes(suggestion.language)) {
       setLanguage(suggestion.language as CardLanguage);
     }
+    if (suggestion.variant && (CARD_VARIANTS as string[]).includes(suggestion.variant)) {
+      setVariant(suggestion.variant as CardVariant);
+    }
+    setVariantDetail(suggestion.variant_detail ?? "");
     setShowSuggestions(false);
   }
 
@@ -254,7 +266,7 @@ export default function ScanPage() {
 
     const requestBody = JSON.stringify({
       images,
-      card: { name: cardName, setName, cardNumber, language },
+      card: { name: cardName, setName, cardNumber, language, variant, variantDetail: variantDetail || undefined },
     });
 
     // Logs to the browser console so a payload that's still too large shows
@@ -401,7 +413,9 @@ export default function ScanPage() {
                         >
                           {s.name} — {s.set_name}
                           {s.card_number && ` #${s.card_number}`}
-                          {s.language && ` (${s.language})`}
+                          {s.variant && s.variant !== "Normal" && ` · ${s.variant}`}
+                          {s.variant_detail && ` (${s.variant_detail})`}
+                          {s.language && ` · ${s.language}`}
                         </button>
                       </li>
                     ))}
@@ -430,6 +444,34 @@ export default function ScanPage() {
               <p className="font-mono text-[11px] text-slate/60 mb-2">
                 Tip: Find the card number in the bottom left or right corner of your card.
               </p>
+
+              <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+                Variant
+              </label>
+              <select
+                value={variant}
+                onChange={(e) => {
+                  setVariant(e.target.value as CardVariant);
+                  setVariantDetail("");
+                }}
+                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+              >
+                {CARD_VARIANTS.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+
+              {needsVariantDetail && (
+                <input
+                  type="text"
+                  value={variantDetail}
+                  onChange={(e) => setVariantDetail(e.target.value)}
+                  placeholder={variantDetailLabel(variant)}
+                  className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+                />
+              )}
 
               <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
                 Language
@@ -536,7 +578,7 @@ export default function ScanPage() {
                   </p>
                 </div>
                 <a
-                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, language })}
+                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, variant, variantDetail, language })}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
@@ -575,7 +617,7 @@ export default function ScanPage() {
                   )}
                 </div>
                 <a
-                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, language })}
+                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, variant, variantDetail, language })}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"

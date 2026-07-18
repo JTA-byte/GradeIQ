@@ -31,6 +31,7 @@
  * needing the full sale list.
  */
 import { createServiceRoleClient } from "@/lib/supabase/server";
+import { CardVariant } from "@/lib/cardVariant";
 
 const BASE_URL = "https://www.pricecharting.com";
 const HEADERS = {
@@ -106,6 +107,99 @@ async function findProductUrl(query: string): Promise<string | null> {
 
   const href = match[1];
   return href.startsWith("http") ? href : `${BASE_URL}${href}`;
+}
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+const VARIANT_SLUG_FRAGMENT: Partial<Record<CardVariant, string>> = {
+  Holo: "holo",
+  "Non-Holo": "non-holo",
+  "Reverse Holo": "reverse-holo",
+  "First Edition": "1st-edition",
+  Shadowless: "shadowless",
+};
+
+/**
+ * Builds the PriceCharting-style product slug for a card + variant, per
+ * the mapping given for this feature (e.g. Shadowless ->
+ * "{name}-shadowless-{number}", Stamped -> "{name}-{stamp}-{number}").
+ *
+ * NOT used to fetch a URL directly -- confirmed live that guessing
+ * slugs this way is unreliable: "charizard-holo-4" 404s (redirects to a
+ * search page) for Base Set Charizard, which has no separate "holo"
+ * slug since the card is already inherently holo with no plain variant.
+ * Exported so callers that DO want to try a direct-URL guess as a last
+ * resort can build one consistently, but the primary lookup path below
+ * instead appends the equivalent human-readable variant term to the
+ * *search query* and lets PriceCharting's own search/redirect logic
+ * resolve it -- verified live that this correctly disambiguates (e.g.
+ * appending "Shadowless" makes the search redirect straight to
+ * .../charizard-shadowless-4 instead of landing on the ambiguous
+ * unlimited-print listing).
+ */
+export function buildPriceChartingSlug(
+  cardName: string,
+  cardNumber: string,
+  variant: CardVariant,
+  variantDetail?: string
+): string {
+  const nameSlug = slugify(cardName);
+  const numberSlug = slugify(cardNumber);
+
+  if (variant === "Stamped") {
+    const stampSlug = variantDetail ? slugify(variantDetail) : "stamped";
+    return [nameSlug, stampSlug, numberSlug].filter(Boolean).join("-");
+  }
+  if (variant === "Promo") {
+    return variantDetail ? [nameSlug, slugify(variantDetail)].filter(Boolean).join("-") : `${nameSlug}-promo`;
+  }
+
+  const fragment = VARIANT_SLUG_FRAGMENT[variant];
+  return [nameSlug, fragment, numberSlug].filter(Boolean).join("-");
+}
+
+/**
+ * The human-readable word(s) to append to a PriceCharting search query
+ * for this variant -- what actually helps their search disambiguate
+ * (verified live), as opposed to buildPriceChartingSlug()'s URL-shaped
+ * fragment. "Normal"/"No Symbol" have no distinguishing term (the base
+ * print with no suffix, or PriceCharting simply doesn't slug it as a
+ * separate variant), so those contribute nothing.
+ */
+function variantSearchTerm(variant: CardVariant, variantDetail?: string): string {
+  switch (variant) {
+    case "Holo":
+      return "Holo";
+    case "Non-Holo":
+      return "Non-Holo";
+    case "Reverse Holo":
+      return "Reverse Holo";
+    case "First Edition":
+      return "1st Edition";
+    case "Shadowless":
+      return "Shadowless";
+    case "Stamped":
+      return variantDetail || "Stamped";
+    case "Promo":
+      return variantDetail || "Promo";
+    case "Full Art":
+      return "Full Art";
+    case "Special Illustration Rare":
+      return "Special Illustration Rare";
+    case "Hyper Rare":
+      return "Hyper Rare";
+    case "Secret Rare":
+      return "Secret Rare";
+    case "Normal":
+    case "No Symbol":
+    default:
+      return "";
+  }
 }
 
 function extractProductName(html: string): string | null {
@@ -282,10 +376,11 @@ async function cacheDbPrice(cardId: string, result: PriceChartingRawPricing): Pr
 /**
  * Looks up a real raw-price read for a card from PriceCharting's
  * individual sold listings (not its own blended "market price"). Takes
- * the card's full identity (name + set + card number) rather than just
- * a name -- a bare name matches too many printings, and including the
- * card number in the search query helps PriceCharting's own search
- * disambiguate between them.
+ * the card's full identity (name + set + card number + variant) rather
+ * than just a name -- a bare name matches too many printings, and
+ * including the card number and a variant term (e.g. "Shadowless",
+ * "1st Edition") in the search query helps PriceCharting's own search
+ * disambiguate between them (verified live -- see variantSearchTerm()).
  *
  * Fallback chain: in-memory cache (same warm instance only) -> DB cache
  * (market_prices, up to DB_CACHE_TTL_HOURS old) -> live scrape. Returns
@@ -297,7 +392,9 @@ export async function getPriceChartingRawPricing(
   cardId: string,
   cardName: string,
   setName: string = "",
-  cardNumber: string = ""
+  cardNumber: string = "",
+  variant: CardVariant = "Normal",
+  variantDetail?: string
 ): Promise<PriceChartingRawPricing | null> {
   const memCached = resultCache.get(cardId);
   if (memCached && Date.now() - memCached.fetchedAt < IN_MEMORY_CACHE_TTL_MS) {
@@ -312,7 +409,10 @@ export async function getPriceChartingRawPricing(
   }
 
   try {
-    const query = `${setName} ${cardName} ${cardNumber}`.trim();
+    const query = [setName, cardName, cardNumber, variantSearchTerm(variant, variantDetail)]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
     // TEMPORARY DEBUG LOGGING -- tracking down a "$0 raw price" report.
     // Remove once the root cause is confirmed fixed in production.
     console.log(`[pricecharting][debug] search query: "${query}"`);

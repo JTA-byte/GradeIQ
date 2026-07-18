@@ -228,6 +228,8 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
     cardName: s.cardName,
     cardNumber: s.cardNumber,
     setName: s.setName,
+    variant: s.variant,
+    variantDetail: s.variantDetail,
     language: s.language,
   };
 
@@ -263,6 +265,8 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           <p className="font-mono text-xs text-slate/70 mt-0.5">
             {s.setName}
             {s.cardNumber && ` #${s.cardNumber}`}
+            {s.variant && s.variant !== "Normal" && ` · ${s.variant}`}
+            {s.variantDetail && ` (${s.variantDetail})`}
             {" · "}
             {s.language}
           </p>

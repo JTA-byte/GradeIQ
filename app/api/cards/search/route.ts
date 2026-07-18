@@ -36,15 +36,34 @@ export async function GET(request: NextRequest) {
       return query;
     }
 
-    let { data, error } = await buildQuery("id, name, set_name, card_number, language");
-
-    // Tolerate cards.language not existing yet on the live DB (added in
-    // supabase/schema.sql, applied by hand) -- fall back rather than
+    // Tolerate cards.variant/variant_detail and/or cards.language not
+    // existing yet on the live DB (added in supabase/schema.sql, applied
+    // by hand) -- fall back a column group at a time rather than
     // breaking autocomplete for however long that takes to run.
+    let { data, error } = await buildQuery("id, name, set_name, card_number, language, variant, variant_detail");
+
+    if (error?.message.includes("variant")) {
+      console.warn("[cards/search] cards.variant doesn't exist yet -- falling back without it.");
+      const fallback = await buildQuery("id, name, set_name, card_number, language");
+      data =
+        fallback.data?.map((row: Record<string, unknown>) => ({
+          ...row,
+          variant: null,
+          variant_detail: null,
+        })) ?? null;
+      error = fallback.error;
+    }
+
     if (error?.message.includes("language")) {
       console.warn("[cards/search] cards.language doesn't exist yet -- falling back without it.");
       const fallback = await buildQuery("id, name, set_name, card_number");
-      data = fallback.data?.map((row: Record<string, unknown>) => ({ ...row, language: null })) ?? null;
+      data =
+        fallback.data?.map((row: Record<string, unknown>) => ({
+          ...row,
+          language: null,
+          variant: null,
+          variant_detail: null,
+        })) ?? null;
       error = fallback.error;
     }
 

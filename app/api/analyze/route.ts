@@ -26,6 +26,7 @@ import { createClient } from "@/lib/supabase/server";
 import { analyzeCardImages, CardImageInput } from "@/lib/visionAnalysis";
 import { getCardMarketData, getCardGemRates } from "@/lib/mockDataService";
 import { CARD_LANGUAGES, CardLanguage, resolveOrCreateCard } from "@/lib/cardIdentifier";
+import { CARD_VARIANTS, CardVariant, variantNeedsDetail } from "@/lib/cardVariant";
 import { enrichCardFromPokemonTCGApi } from "@/lib/dynamicCardLookup";
 import {
   GRADERS,
@@ -43,6 +44,8 @@ interface CardIdentifierInput {
   setName?: string;
   cardNumber?: string;
   language?: string;
+  variant?: string;
+  variantDetail?: string;
 }
 
 function errorMessage(err: unknown): string {
@@ -112,6 +115,8 @@ export async function POST(request: NextRequest) {
     const setName = cardInput?.setName?.trim();
     const cardNumber = cardInput?.cardNumber?.trim();
     const language = (cardInput?.language?.trim() || "English") as CardLanguage;
+    const variant = (cardInput?.variant?.trim() || "Normal") as CardVariant;
+    const variantDetail = cardInput?.variantDetail?.trim() || undefined;
 
     if (!images || images.length === 0 || !cardName || !setName || !cardNumber) {
       return NextResponse.json(
@@ -126,6 +131,25 @@ export async function POST(request: NextRequest) {
     if (!CARD_LANGUAGES.includes(language)) {
       return NextResponse.json(
         { error: `Invalid card.language "${language}" -- must be one of ${CARD_LANGUAGES.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    if (!CARD_VARIANTS.includes(variant)) {
+      return NextResponse.json(
+        { error: `Invalid card.variant "${variant}" -- must be one of ${CARD_VARIANTS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    if (variantNeedsDetail(variant) && !variantDetail) {
+      return NextResponse.json(
+        {
+          error:
+            variant === "Promo"
+              ? "card.variantDetail (promo number, e.g. SWSH001) is required when card.variant is \"Promo\""
+              : "card.variantDetail (stamp type, e.g. Prerelease) is required when card.variant is \"Stamped\"",
+        },
         { status: 400 }
       );
     }
@@ -185,12 +209,20 @@ export async function POST(request: NextRequest) {
     }
 
     // ── 6. Resolve card identity, then market data + gem rates ───────────────
-    // Matched by name + set + card number + language, not just a bare
-    // name -- see lib/cardIdentifier.ts for why that matters (a name
-    // alone matches too many printings for accurate pricing lookups).
+    // Matched by name + set + card number + language + variant, not just
+    // a bare name -- see lib/cardIdentifier.ts for why that matters (a
+    // name alone matches too many printings for accurate pricing
+    // lookups).
     let resolvedCard;
     try {
-      resolvedCard = await resolveOrCreateCard({ name: cardName, setName, cardNumber, language });
+      resolvedCard = await resolveOrCreateCard({
+        name: cardName,
+        setName,
+        cardNumber,
+        language,
+        variant,
+        variantDetail,
+      });
     } catch (err) {
       return NextResponse.json(
         { error: `Card identity lookup failed: ${errorMessage(err)}` },
@@ -202,13 +234,20 @@ export async function POST(request: NextRequest) {
     // Remove once the root cause is confirmed fixed in production.
     console.log(
       `[analyze][debug] resolved card: id=${resolvedCard.id} isNew=${resolvedCard.isNew} ` +
-        `identity="${cardName}" / "${setName}" #${cardNumber} (${language})`
+        `identity="${cardName}" / "${setName}" #${cardNumber} (${language}, ${variant}${variantDetail ? " " + variantDetail : ""})`
     );
 
     let marketData, gemRates;
     try {
       [marketData, gemRates] = await Promise.all([
-        getCardMarketData({ cardId: resolvedCard.id, cardName, setName, cardNumber }),
+        getCardMarketData({
+          cardId: resolvedCard.id,
+          cardName,
+          setName,
+          cardNumber,
+          variant,
+          variantDetail,
+        }),
         getCardGemRates(cardName, setName),
       ]);
     } catch (err) {

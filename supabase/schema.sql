@@ -13,12 +13,18 @@ create table cards (
   set_name text not null,
   card_number text,
   language text not null default 'English' check (language in ('English', 'Japanese', 'Korean', 'Chinese')),
+  variant text not null default 'Normal' check (variant in (
+    'Normal', 'Holo', 'Non-Holo', 'Reverse Holo', 'First Edition', 'Shadowless',
+    'No Symbol', 'Stamped', 'Promo', 'Full Art', 'Special Illustration Rare',
+    'Hyper Rare', 'Secret Rare'
+  )),
+  variant_detail text, -- stamp type ("Prerelease", "Staff", "League") or promo number ("SWSH001") when variant needs one
   rarity text,
   release_year int,
   tcgplayer_product_id text,
   image_url text,
   created_at timestamptz default now(),
-  unique (name, set_name, card_number, language)
+  unique (name, set_name, card_number, language, variant, variant_detail)
 );
 
 create index idx_cards_name on cards using gin (to_tsvector('english', name));

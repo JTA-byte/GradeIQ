@@ -102,6 +102,8 @@ export interface BuySignal {
   setName: string;
   cardNumber: string | null;
   language: string;
+  variant: string;
+  variantDetail: string | null;
   bestGrader: GraderId;
   bestGraderName: string;
   targetGradeLabel: string; // e.g. "PSA 10"
@@ -139,6 +141,8 @@ interface CardRow {
   set_name: string;
   card_number: string | null;
   language: string | null;
+  variant: string | null;
+  variant_detail: string | null;
 }
 
 interface GemRateRow {
@@ -400,26 +404,58 @@ async function fetchMarketSales(
 
 /**
  * Same tolerate-missing-column reasoning as fetchMarketSales() above --
- * `cards.language` is added in supabase/schema.sql but applied to the
- * live DB by hand, and this query runs on every Buy Signals page load.
+ * `cards.language` and `cards.variant`/`variant_detail` are added in
+ * supabase/schema.sql but applied to the live DB by hand, and this query
+ * runs on every Buy Signals page load. Falls back a column group at a
+ * time so whichever migrations *have* been applied still take effect.
  */
 async function fetchCards(supabase: ReturnType<typeof createServiceRoleClient>): Promise<CardRow[]> {
   try {
-    return await fetchAllRows<CardRow>(supabase, "cards", "id, name, set_name, card_number, language");
+    return await fetchAllRows<CardRow>(
+      supabase,
+      "cards",
+      "id, name, set_name, card_number, language, variant, variant_detail"
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+
+    if (message.includes("variant")) {
+      console.warn(
+        "[buySignals] cards.variant doesn't exist yet -- falling back without it. " +
+          "Run the migration in supabase/schema.sql to enable variant display."
+      );
+      try {
+        const rows = await fetchAllRows<Omit<CardRow, "variant" | "variant_detail">>(
+          supabase,
+          "cards",
+          "id, name, set_name, card_number, language"
+        );
+        return rows.map((r) => ({ ...r, variant: null, variant_detail: null }));
+      } catch (err2) {
+        const message2 = err2 instanceof Error ? err2.message : String(err2);
+        if (!message2.includes("language")) throw err2;
+        console.warn("[buySignals] cards.language doesn't exist yet either -- falling back without it too.");
+        const rows = await fetchAllRows<Omit<CardRow, "language" | "variant" | "variant_detail">>(
+          supabase,
+          "cards",
+          "id, name, set_name, card_number"
+        );
+        return rows.map((r) => ({ ...r, language: null, variant: null, variant_detail: null }));
+      }
+    }
+
     if (!message.includes("language")) throw err;
 
     console.warn(
       "[buySignals] cards.language doesn't exist yet -- falling back without it. " +
         "Run the migration in supabase/schema.sql to enable language display."
     );
-    const rows = await fetchAllRows<Omit<CardRow, "language">>(
+    const rows = await fetchAllRows<Omit<CardRow, "language" | "variant" | "variant_detail">>(
       supabase,
       "cards",
       "id, name, set_name, card_number"
     );
-    return rows.map((r) => ({ ...r, language: null }));
+    return rows.map((r) => ({ ...r, language: null, variant: null, variant_detail: null }));
   }
 }
 
@@ -505,6 +541,8 @@ export async function getBuySignals(): Promise<BuySignal[]> {
         setName: card.set_name,
         cardNumber: card.card_number,
         language: card.language ?? "English",
+        variant: card.variant ?? "Normal",
+        variantDetail: card.variant_detail,
         bestGrader: best.grader,
         bestGraderName: `${graderConfig.name} ${graderConfig.tier}`,
         targetGradeLabel: best.targetGradeLabel,

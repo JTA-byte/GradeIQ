@@ -32,6 +32,7 @@
 import { CardMarketData, GemRateData } from "./roiEngine";
 import { getPriceChartingRawPricing, PriceConfidence } from "./priceCharting";
 import { getGradedSalePrices, getTCGPlayerRawPricing } from "./tcgplayer";
+import { CardVariant } from "./cardVariant";
 
 interface MockCardProfile {
   rawCost: number;
@@ -136,6 +137,8 @@ export interface ResolvedCardInput {
   cardName: string;
   setName: string;
   cardNumber: string;
+  variant?: CardVariant;
+  variantDetail?: string;
 }
 
 // Where a scan's raw price actually came from, and the exact label the
@@ -199,7 +202,9 @@ export async function getCardMarketData(
     card.cardId,
     card.cardName,
     card.setName,
-    card.cardNumber
+    card.cardNumber,
+    card.variant ?? "Normal",
+    card.variantDetail
   );
 
   console.log(
