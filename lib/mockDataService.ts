@@ -118,6 +118,21 @@ function findProfile(cardName: string): MockCardProfile {
   return DEFAULT_PROFILE;
 }
 
+/**
+ * True when `cardName` doesn't match any named mock profile and would
+ * fall through to DEFAULT_PROFILE -- i.e. a genuinely unrecognized card,
+ * as opposed to one of the four illustrative sample cards above. Used to
+ * decide whether to trigger dynamicCardLookup (lib/dynamicCardLookup.ts).
+ */
+export function isUnknownCard(cardName: string): boolean {
+  const normalized = normalizeCardName(cardName);
+  if (MOCK_CARD_DATABASE[normalized]) return false;
+  const partialMatch = Object.keys(MOCK_CARD_DATABASE).find(
+    (key) => normalized.includes(key) || key.includes(normalized)
+  );
+  return !partialMatch;
+}
+
 export async function getCardMarketData(
   cardName: string,
   shippingRoundTrip: number = 20

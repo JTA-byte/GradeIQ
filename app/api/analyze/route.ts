@@ -23,7 +23,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { analyzeCardImages, CardImageInput } from "@/lib/visionAnalysis";
-import { getCardMarketData, getCardGemRates } from "@/lib/mockDataService";
+import { getCardMarketData, getCardGemRates, isUnknownCard } from "@/lib/mockDataService";
+import { dynamicCardLookup } from "@/lib/dynamicCardLookup";
 import { getGraderRecommendations, VisionAssessment } from "@/lib/roiEngine";
 import { checkScanAllowance, recordScanUsed } from "@/lib/scanGating";
 
@@ -165,6 +166,24 @@ export async function POST(request: NextRequest) {
         { error: `Market data lookup failed: ${errorMessage(err)}` },
         { status: 502 }
       );
+    }
+
+    // getCardMarketData() fell back to DEFAULT_PROFILE for this card --
+    // search the Pokemon TCG API and add a real `cards` row for it, so
+    // the nightly Alt.xyz scrape (jobs/nightly_price_scrape.py) picks it
+    // up going forward instead of it being stuck on mock data forever.
+    // Non-fatal and doesn't affect this request's own marketData, which
+    // was already computed above -- see lib/dynamicCardLookup.ts for why
+    // this can't scrape real prices in time for the current response.
+    if (isUnknownCard(cardName)) {
+      try {
+        const newCardId = await dynamicCardLookup(cardName);
+        if (newCardId) {
+          console.log(`[analyze] dynamic card lookup created cards row ${newCardId} for "${cardName}"`);
+        }
+      } catch (err) {
+        console.error("[analyze] dynamic card lookup failed:", err);
+      }
     }
 
     // ── 7. ROI engine ─────────────────────────────────────────────────────────
