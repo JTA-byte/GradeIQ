@@ -25,3 +25,6 @@ npm-debug.log*
 __pycache__/
 *.pyc
 python-services/.env
+
+# generated data exports
+supabase/cards_export.xlsx
