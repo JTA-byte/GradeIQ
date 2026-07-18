@@ -46,6 +46,14 @@ export function AppHeader() {
           <span className="font-mono text-xs text-slate uppercase tracking-widest hidden sm:block">
             Grader recommendation engine
           </span>
+          <nav className="flex items-center gap-3">
+            <a
+              href="/buy-signals"
+              className="font-mono text-xs text-slate hover:text-moss transition-colors"
+            >
+              Buy Signals
+            </a>
+          </nav>
         </div>
 
         <div className="flex items-center gap-4">
@@ -80,6 +88,12 @@ export function AppHeader() {
 
           {user ? (
             <div className="flex items-center gap-3">
+              <a
+                href="/portfolio"
+                className="font-mono text-xs text-slate border border-line px-3 py-1 hover:border-moss hover:text-moss transition-colors hidden sm:block"
+              >
+                Portfolio
+              </a>
               <a
                 href="/scans"
                 className="font-mono text-xs text-slate border border-line px-3 py-1 hover:border-moss hover:text-moss transition-colors hidden sm:block"

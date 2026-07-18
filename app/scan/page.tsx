@@ -5,6 +5,7 @@ import { useRef } from "react";
 import { AppHeader } from "@/components/AppHeader";
 import { GraderSlab } from "@/components/GraderSlab";
 import type { FullRecommendation } from "@/lib/roiEngine";
+import { ebaySoldListingsUrl } from "@/lib/ebayLink";
 
 interface SlotDef {
   key: string;
@@ -102,6 +103,7 @@ interface AnalysisResponse {
     worstZone: string;
   };
   recommendation: FullRecommendation;
+  maxBuyPrice: number | null;
   meta?: {
     scansUsed: number;
     scansLimit: number;
@@ -401,6 +403,28 @@ export default function ScanPage() {
                   {result.recommendation.arbitrageFlag}
                 </div>
               )}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-line bg-white/40 px-4 py-3">
+                <div className="font-mono text-xs text-slate">
+                  {result.maxBuyPrice !== null ? (
+                    <>
+                      Max buy price for 50% ROI:{" "}
+                      <span className="font-display text-lg text-ink">
+                        ${result.maxBuyPrice.toLocaleString()}
+                      </span>
+                    </>
+                  ) : (
+                    "No grader clears the confidence threshold, so there's no target buy price for this copy."
+                  )}
+                </div>
+                <a
+                  href={ebaySoldListingsUrl(cardName)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
+                >
+                  Find on eBay
+                </a>
+              </div>
             </section>
 
             {/* Grader comparison — 4 columns for PSA/CGC/BGS/TAG */}

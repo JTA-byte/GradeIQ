@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx lib/roiEngine.test.ts"
+    "test": "tsx lib/roiEngine.test.ts && tsx lib/iqScore.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.0",

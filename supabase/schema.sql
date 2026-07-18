@@ -136,10 +136,53 @@ create table scans (
 create index idx_scans_user on scans (user_id, created_at desc);
 
 -- =========================================
+-- PORTFOLIO_ITEMS: a user's tracked card holdings, from raw purchase
+-- through grading submission to final sale. card_name is free text
+-- rather than a `cards` FK -- a portfolio entry shouldn't be blocked by
+-- whether that exact card happens to already be in our reference catalog.
+-- Estimated grader return date isn't stored here -- it's computed from
+-- submission_date + the grader's turnaroundDays (lib/roiEngine.ts's
+-- GRADERS config), so there's one source of truth for turnaround times.
+-- =========================================
+create table portfolio_items (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid references auth.users(id) not null,
+
+  card_name text not null,
+  raw_purchase_price numeric not null,
+  date_bought date not null,
+
+  status text not null default 'raw' check (status in ('raw', 'submitted', 'graded', 'sold')),
+
+  grader text check (grader in ('PSA', 'CGC', 'BGS', 'TAG')), -- null until submitted
+  submission_date date,                                        -- null until submitted
+  grade_received text,                                         -- null until graded
+  sale_price numeric,                                          -- null until sold
+
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index idx_portfolio_items_user on portfolio_items (user_id, created_at desc);
+
+create or replace function set_portfolio_item_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+create trigger portfolio_items_updated_at
+  before update on portfolio_items
+  for each row execute procedure set_portfolio_item_updated_at();
+
+-- =========================================
 -- Row Level Security
 -- =========================================
 alter table user_profiles enable row level security;
 alter table scans enable row level security;
+alter table portfolio_items enable row level security;
 
 create policy "Users can view own profile"
   on user_profiles for select using (auth.uid() = id);
@@ -152,6 +195,18 @@ create policy "Users can view own scans"
 
 create policy "Users can insert own scans"
   on scans for insert with check (auth.uid() = user_id);
+
+create policy "Users can view own portfolio items"
+  on portfolio_items for select using (auth.uid() = user_id);
+
+create policy "Users can insert own portfolio items"
+  on portfolio_items for insert with check (auth.uid() = user_id);
+
+create policy "Users can update own portfolio items"
+  on portfolio_items for update using (auth.uid() = user_id);
+
+create policy "Users can delete own portfolio items"
+  on portfolio_items for delete using (auth.uid() = user_id);
 
 -- Public reference tables stay readable by anyone (cards, gem_rates, market_prices, grader_events)
 alter table cards enable row level security;

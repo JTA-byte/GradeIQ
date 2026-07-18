@@ -25,7 +25,13 @@ import { createClient } from "@/lib/supabase/server";
 import { analyzeCardImages, CardImageInput } from "@/lib/visionAnalysis";
 import { getCardMarketData, getCardGemRates, isUnknownCard } from "@/lib/mockDataService";
 import { dynamicCardLookup } from "@/lib/dynamicCardLookup";
-import { getGraderRecommendations, VisionAssessment } from "@/lib/roiEngine";
+import {
+  GRADERS,
+  calculateMaxBuyPrice,
+  deriveGradeProbabilities,
+  getGraderRecommendations,
+  VisionAssessment,
+} from "@/lib/roiEngine";
 import { checkScanAllowance, recordScanUsed } from "@/lib/scanGating";
 
 const REQUIRED_LABELS = ["Front Full", "Back Full"];
@@ -210,6 +216,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Max buy price: the most you could pay raw and still hit a 50% net
+    // ROI target with the best-passing grader. Null when no grader clears
+    // the vision confidence gate -- there's no "right price" for a copy
+    // this app doesn't think is worth grading in the first place.
+    let maxBuyPrice: number | null = null;
+    if (recommendation.bestOption) {
+      const bestGraderConfig = GRADERS.find((g) => g.id === recommendation.bestOption!.grader);
+      if (bestGraderConfig) {
+        const gemRate = gemRates[recommendation.bestOption.grader];
+        const probs = deriveGradeProbabilities(gemRate, visionResult.overallScore);
+        maxBuyPrice = calculateMaxBuyPrice({
+          grader: bestGraderConfig,
+          gradeProbabilities: probs,
+          topGradePrice: marketData.topGradePrice,
+          midGradePrice: marketData.midGradePrice,
+          belowGradePrice: marketData.rawMarketPrice * 0.85,
+          shippingRoundTrip: marketData.shippingRoundTrip,
+        });
+      }
+    }
+
     // ── 8. Save scan record ──────────────────────────────────────────────────
     try {
       await supabase.from("scans").insert({
@@ -243,6 +270,7 @@ export async function POST(request: NextRequest) {
       market: marketData,
       gemRates,
       recommendation,
+      maxBuyPrice,
       meta: {
         scansUsed: allowance.scansUsed + 1,
         scansLimit: allowance.scansLimit,

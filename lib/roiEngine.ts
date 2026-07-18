@@ -149,6 +149,27 @@ function blendedTopGradeProbability(gemRate: number, visionScore: number): numbe
   return Math.min(1, Math.max(0, blended));
 }
 
+export interface GradeProbabilities {
+  topProb: number; // 0-1
+  midProb: number; // 0-1
+  lowProb: number; // 0-1 -- these three sum to 1
+}
+
+/**
+ * Derives top/mid/low grade probabilities from gem rate (and, optionally,
+ * a vision score) using the same blend calculateGraderRecommendation uses
+ * internally -- exported so callers that don't have a completed scan yet
+ * (e.g. the buy-signals page, screening cards nobody has photographed)
+ * can still get a reasonable probability split, by omitting visionScore
+ * to fall back to a neutral, "hasn't been assessed" midpoint.
+ */
+export function deriveGradeProbabilities(gemRate: number, visionScore = 7.5): GradeProbabilities {
+  const topProb = blendedTopGradeProbability(gemRate, visionScore);
+  const midProb = Math.min(1 - topProb, 0.45);
+  const lowProb = Math.max(0, 1 - topProb - midProb);
+  return { topProb, midProb, lowProb };
+}
+
 function calculateGraderRecommendation(
   grader: GraderConfig,
   market: CardMarketData,
@@ -156,9 +177,7 @@ function calculateGraderRecommendation(
   totalPop: number | undefined,
   vision: VisionAssessment
 ): GraderRecommendation {
-  const topProb = blendedTopGradeProbability(gemRate, vision.overallScore);
-  const midProb = Math.min(1 - topProb, 0.45);
-  const lowProb = Math.max(0, 1 - topProb - midProb);
+  const { topProb, midProb, lowProb } = deriveGradeProbabilities(gemRate, vision.overallScore);
 
   const adjustedTopPrice = market.topGradePrice * grader.saleMultiplier;
   const adjustedMidPrice = market.midGradePrice * grader.saleMultiplier;
@@ -262,4 +281,47 @@ export function getGraderRecommendations(
     verdictReason,
     arbitrageFlag: detectArbitrage(gemRates),
   };
+}
+
+export interface MaxBuyPriceInput {
+  targetRoiPct?: number; // default 50 (meaning +50% return on total cash outlay)
+  grader: GraderConfig; // supplies fee and sellPlatformFeePct
+  gradeProbabilities: GradeProbabilities; // see deriveGradeProbabilities()
+  topGradePrice: number; // e.g. PSA 10 sale price, unadjusted -- saleMultiplier is applied here
+  midGradePrice: number; // e.g. PSA 9 sale price, unadjusted
+  belowGradePrice: number; // fallback price if it misses the top/mid tiers (e.g. raw sale price)
+  shippingRoundTrip?: number; // default 20
+}
+
+/**
+ * Solves calculateGraderRecommendation's net ROI formula backwards: given
+ * a target ROI% instead of a known raw cost, what's the most you could
+ * pay raw and still hit that target?
+ *
+ * Forward formula (see calculateGraderRecommendation):
+ *   netROI = expectedSalePrice - costBasis - platformFee
+ *   ROI%   = netROI / costBasis * 100,  where costBasis = rawCost + fee + shipping
+ *
+ * Solving for costBasis given a target ROI% (platformFee is a fixed
+ * percentage of expectedSalePrice, independent of cost, so this is a
+ * straightforward rearrangement rather than an iterative solve):
+ *   costBasis = expectedSalePrice * (1 - sellPlatformFeePct) / (1 + targetRoiPct / 100)
+ *   maxBuyPrice = costBasis - fee - shipping
+ */
+export function calculateMaxBuyPrice(input: MaxBuyPriceInput): number {
+  const targetRoiPct = input.targetRoiPct ?? 50;
+  const shipping = input.shippingRoundTrip ?? 20;
+  const { topProb, midProb, lowProb } = input.gradeProbabilities;
+
+  const adjustedTopPrice = input.topGradePrice * input.grader.saleMultiplier;
+  const adjustedMidPrice = input.midGradePrice * input.grader.saleMultiplier;
+
+  const expectedSalePrice =
+    topProb * adjustedTopPrice + midProb * adjustedMidPrice + lowProb * input.belowGradePrice;
+
+  const netSaleProceeds = expectedSalePrice * (1 - input.grader.sellPlatformFeePct);
+  const costBasis = netSaleProceeds / (1 + targetRoiPct / 100);
+  const maxBuyPrice = costBasis - input.grader.fee - shipping;
+
+  return Math.max(0, Math.round(maxBuyPrice * 100) / 100);
 }
