@@ -129,8 +129,20 @@ class AltScraper(BaseSaleScraper):
             page = await context.new_page()
 
             try:
-                await page.goto(search_url, wait_until="load", timeout=20000)
-                await page.wait_for_timeout(4000)
+                # domcontentloaded fires as soon as the HTML/DOM is parsed --
+                # much sooner than "load" or "networkidle", which can wait a
+                # long time on a JS-heavy SPA like this one that keeps
+                # polling/streaming in the background. The explicit wait for
+                # .virtuoso-grid-item right after is what actually confirms
+                # the app has hydrated and rendered results, rather than
+                # relying on a load-event heuristic.
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+
+                try:
+                    await page.wait_for_selector(".virtuoso-grid-item", timeout=60000)
+                except Exception:
+                    self.logger.info(f"No results rendered for '{search_query}' on Alt")
+                    return []
 
                 # Best-effort dismiss of the sign-up modal -- see file header.
                 try:
@@ -138,12 +150,6 @@ class AltScraper(BaseSaleScraper):
                     await close_button.click(timeout=2000)
                 except Exception:
                     pass
-
-                try:
-                    await page.wait_for_selector(".virtuoso-grid-item", timeout=10000)
-                except Exception:
-                    self.logger.info(f"No results rendered for '{search_query}' on Alt")
-                    return []
 
                 rows = await page.locator(".virtuoso-grid-item").all()
 

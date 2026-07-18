@@ -1,9 +1,8 @@
 """
 Nightly graded-card sale price scraping job.
 
-Orchestrates all three sale-history scrapers (130point, PriceCharting,
-Alt) across every card in the database and writes results into the
-market_sales table.
+Orchestrates the sale-history scrapers across every card in the database
+and writes results into the market_sales table.
 
 Run manually:
   python -m jobs.nightly_price_scrape
@@ -13,9 +12,23 @@ Run on a schedule (Render/Railway cron, or a plain crontab entry):
 
 Runs an hour after nightly_pop_scrape (0 3 * * *) by convention -- stagger
 these if running both on the same host so they don't compete for
-CPU/network. With the 3s+ rate limit per source and three sources
-running concurrently per card, scraping ~500 cards takes roughly
-500 * 3s ~= 25 minutes wall-clock, since sources run in parallel per card.
+CPU/network.
+
+--------------------------------------------------------------------------
+Point130Scraper and PriceChartingScraper are temporarily disabled -- the
+nightly GitHub Actions run reported them as blocked by robots.txt. Only
+AltScraper runs for now. Re-enable the other two (uncomment the imports
+and add them back to SCRAPERS below) once that's sorted out.
+
+Note: an earlier manual check of 130point.com/robots.txt (Allow: /,
+Disallow: /api/ only) and pricecharting.com/robots.txt (Disallow:
+/stripe-connect, /publish-offer, /buy only) suggested neither scraper's
+actual search/product URLs should be blocked. If they're still being
+skipped after re-enabling, check whether `check_robots_allowed()` in
+base_scraper.py is resolving/parsing robots.txt correctly in the Actions
+runner's environment specifically, rather than assuming the sites
+themselves disallow it.
+--------------------------------------------------------------------------
 """
 from __future__ import annotations
 
@@ -25,8 +38,10 @@ import sys
 
 from db.supabase_client import get_cards_to_scrape, get_client, write_sale_record
 from scrapers.alt_scraper import AltScraper
-from scrapers.point130_scraper import Point130Scraper
-from scrapers.pricecharting_scraper import PriceChartingScraper
+
+# Temporarily disabled -- see module docstring.
+# from scrapers.point130_scraper import Point130Scraper
+# from scrapers.pricecharting_scraper import PriceChartingScraper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("jobs.nightly_price_scrape")
 
-SCRAPERS = [Point130Scraper(), PriceChartingScraper(), AltScraper()]
+SCRAPERS = [AltScraper()]
 
 
 async def run_job(limit: int | None = None) -> None:
@@ -48,7 +63,7 @@ async def run_job(limit: int | None = None) -> None:
         )
         return
 
-    logger.info(f"Starting nightly sale scrape for {len(cards)} cards across 3 sources")
+    logger.info(f"Starting nightly sale scrape for {len(cards)} cards across {len(SCRAPERS)} source(s)")
 
     total_written = 0
     total_failed = 0
