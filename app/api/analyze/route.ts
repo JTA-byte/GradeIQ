@@ -198,6 +198,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // TEMPORARY DEBUG LOGGING -- tracking down a "$0 raw price" report.
+    // Remove once the root cause is confirmed fixed in production.
+    console.log(
+      `[analyze][debug] resolved card: id=${resolvedCard.id} isNew=${resolvedCard.isNew} ` +
+        `identity="${cardName}" / "${setName}" #${cardNumber} (${language})`
+    );
+
     let marketData, gemRates;
     try {
       [marketData, gemRates] = await Promise.all([
@@ -210,6 +217,16 @@ export async function POST(request: NextRequest) {
         { status: 502 }
       );
     }
+
+    // TEMPORARY DEBUG LOGGING -- tracking down a "$0 raw price" report.
+    // Remove once the root cause is confirmed fixed in production.
+    console.log("[analyze][debug] final marketData returned to client:", {
+      rawCost: marketData.rawCost,
+      rawMarketPrice: marketData.rawMarketPrice,
+      priceConfidence: marketData.priceConfidence,
+      rawPriceSource: marketData.rawPriceSource,
+      rawPriceLabel: marketData.rawPriceLabel,
+    });
 
     // A brand-new cards row has no rarity yet -- best-effort backfill from
     // the Pokemon TCG API. Non-fatal (enrichCardFromPokemonTCGApi swallows

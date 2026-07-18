@@ -108,6 +108,35 @@ async function findProductUrl(query: string): Promise<string | null> {
   return href.startsWith("http") ? href : `${BASE_URL}${href}`;
 }
 
+function extractProductName(html: string): string | null {
+  const match = html.match(/id="product_name"[^>]*>\s*([^\n<]+)/);
+  return match ? match[1].trim() : null;
+}
+
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/**
+ * Guards against PriceCharting's own search silently falling back to an
+ * unrelated product when it can't find a good match, rather than
+ * returning no results -- confirmed live: searching a deliberately fake
+ * card name/set/number matched a real but completely unrelated "Scoop
+ * Up" trainer card and returned its real (wrong) price with no
+ * indication anything was off. Requires at least the card name's first
+ * significant word to appear in the matched product's own name -- lax
+ * on purpose, since real PriceCharting product names often add
+ * parenthetical variant text ("(Alternate Art Secret)") that a stricter
+ * check would reject.
+ */
+function looksLikeMatch(cardName: string, productName: string): boolean {
+  const cardWords = normalizeForMatch(cardName)
+    .split(" ")
+    .filter((w) => w.length > 2);
+  if (cardWords.length === 0) return true;
+  return normalizeForMatch(productName).includes(cardWords[0]);
+}
+
 function extractUngradedTabHtml(html: string): string {
   // Must match the actual `<div class="completed-auctions-used">` that
   // wraps the sold-listing table, not the several other same-page
@@ -284,7 +313,12 @@ export async function getPriceChartingRawPricing(
 
   try {
     const query = `${setName} ${cardName} ${cardNumber}`.trim();
+    // TEMPORARY DEBUG LOGGING -- tracking down a "$0 raw price" report.
+    // Remove once the root cause is confirmed fixed in production.
+    console.log(`[pricecharting][debug] search query: "${query}"`);
+
     const productUrl = await findProductUrl(query);
+    console.log(`[pricecharting][debug] search query "${query}" -> product URL:`, productUrl);
     if (!productUrl) {
       console.log("[pricecharting] no product match for", cardName);
       return null;
@@ -297,10 +331,23 @@ export async function getPriceChartingRawPricing(
     }
 
     const res = await fetch(productUrl, { headers: HEADERS });
+    console.log(`[pricecharting][debug] product page fetch status: ${res.status} for ${productUrl}`);
     if (!res.ok) return null;
 
     const html = await res.text();
+
+    const productName = extractProductName(html);
+    console.log(`[pricecharting][debug] matched product name: "${productName}" for query "${query}"`);
+    if (productName && !looksLikeMatch(cardName, productName)) {
+      console.warn(
+        `[pricecharting] matched product "${productName}" doesn't look like "${cardName}" -- ` +
+          `treating as no match rather than returning a wrong price`
+      );
+      return null;
+    }
+
     const sales = parseRawSales(html);
+    console.log(`[pricecharting][debug] parsed ${sales.length} raw sold listing(s) from ${productUrl}`);
     if (sales.length === 0) {
       console.log("[pricecharting] no sold listings found for", cardName);
       return null;

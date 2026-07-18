@@ -163,10 +163,21 @@ export async function getCardMarketData(
     getGradedSalePrices(card.cardId),
   ]);
 
+  console.log(
+    `[mockDataService] TCGPlayer result for "${card.cardName}" (${card.setName} #${card.cardNumber}):`,
+    live
+  );
+
   const topGradePrice = gradedSales.topGradePrice ?? profile.topGradePrice;
   const midGradePrice = gradedSales.midGradePrice ?? profile.midGradePrice;
 
-  if (live && live.marketPrice !== null) {
+  // TCGPlayer's pricing API reports 0 (not null) for a product it has no
+  // recent sales data for -- `!== null` alone let a real product with no
+  // real price through as if it were a legitimate $0 market price, which
+  // is where an earlier "$0 raw price" report traced back to. Guarding
+  // on `> 0` treats that the same as "no data," falling through to
+  // PriceCharting instead of returning a price no card actually has.
+  if (live && live.marketPrice !== null && live.marketPrice > 0) {
     return {
       rawCost: live.lowPrice ?? live.marketPrice,
       rawMarketPrice: live.marketPrice,
@@ -179,17 +190,24 @@ export async function getCardMarketData(
     };
   }
 
-  // No TCGPlayer keys configured, or the live lookup failed/found nothing --
-  // try PriceCharting's real sold-listing medians next (its own cache
-  // chain -- in-memory, then market_prices -- lives in
-  // lib/priceCharting.ts), before falling back to mock data.
+  // No TCGPlayer keys configured, the live lookup failed/found nothing,
+  // or it returned a $0/no-data price -- try PriceCharting's real
+  // sold-listing medians next (its own cache chain -- in-memory, then
+  // market_prices -- lives in lib/priceCharting.ts), before falling back
+  // to mock data.
   const priceCharting = await getPriceChartingRawPricing(
     card.cardId,
     card.cardName,
     card.setName,
     card.cardNumber
   );
-  if (priceCharting && priceCharting.primaryPrice !== null) {
+
+  console.log(
+    `[mockDataService] PriceCharting result for "${card.cardName}" (${card.setName} #${card.cardNumber}):`,
+    priceCharting
+  );
+
+  if (priceCharting && priceCharting.primaryPrice !== null && priceCharting.primaryPrice > 0) {
     return {
       rawCost: priceCharting.primaryPrice,
       rawMarketPrice: priceCharting.primaryPrice,
