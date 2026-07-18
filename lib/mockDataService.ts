@@ -11,7 +11,10 @@
  * "low") so callers/UI can show how much to trust the number: TCGPlayer's
  * live market price is "high", PriceCharting's confidence depends on
  * recent sale volume (see lib/priceCharting.ts), and mock data is always
- * "low" since it isn't real.
+ * "low" since it isn't real. It also carries `rawPriceSource` and a
+ * ready-to-display `rawPriceLabel` ("Raw price from PriceCharting",
+ * "Estimated — verify on eBay", etc.) so the scan results UI never has
+ * to guess which tier actually produced the number.
  *
  * Separately, getGradedSalePrices() supplies real topGradePrice (PSA 10)
  * / midGradePrice (PSA 9) values sourced from the market_sales table --
@@ -135,10 +138,25 @@ export interface ResolvedCardInput {
   cardNumber: string;
 }
 
+// Where a scan's raw price actually came from, and the exact label the
+// scan results UI shows for it -- callers should never construct this
+// text themselves, so there's one place that decides what "trustworthy"
+// looks like to a user. PriceCharting's own cache tier (in-memory, then
+// market_prices -- see lib/priceCharting.ts) is an internal freshness
+// detail, not something that changes what's shown here: either way it's
+// a real median computed from actual sold listings.
+export type RawPriceSource = "tcgplayer" | "pricecharting" | "mock";
+
+const RAW_PRICE_LABELS: Record<RawPriceSource, string> = {
+  tcgplayer: "Raw price from TCGPlayer",
+  pricecharting: "Raw price from PriceCharting",
+  mock: "Estimated — verify on eBay",
+};
+
 export async function getCardMarketData(
   card: ResolvedCardInput,
   shippingRoundTrip: number = 20
-): Promise<CardMarketData & { priceConfidence: PriceConfidence }> {
+): Promise<CardMarketData & { priceConfidence: PriceConfidence; rawPriceSource: RawPriceSource; rawPriceLabel: string }> {
   const profile = findProfile(card.cardName, card.setName);
   const [live, gradedSales] = await Promise.all([
     getTCGPlayerRawPricing(card.cardId, card.cardName),
@@ -156,13 +174,21 @@ export async function getCardMarketData(
       midGradePrice,
       shippingRoundTrip,
       priceConfidence: "high",
+      rawPriceSource: "tcgplayer",
+      rawPriceLabel: RAW_PRICE_LABELS.tcgplayer,
     };
   }
 
   // No TCGPlayer keys configured, or the live lookup failed/found nothing --
-  // try PriceCharting's real sold-listing medians next, before falling
-  // back to mock data.
-  const priceCharting = await getPriceChartingRawPricing(card.cardName, card.setName, card.cardNumber);
+  // try PriceCharting's real sold-listing medians next (its own cache
+  // chain -- in-memory, then market_prices -- lives in
+  // lib/priceCharting.ts), before falling back to mock data.
+  const priceCharting = await getPriceChartingRawPricing(
+    card.cardId,
+    card.cardName,
+    card.setName,
+    card.cardNumber
+  );
   if (priceCharting && priceCharting.primaryPrice !== null) {
     return {
       rawCost: priceCharting.primaryPrice,
@@ -171,12 +197,14 @@ export async function getCardMarketData(
       midGradePrice,
       shippingRoundTrip,
       priceConfidence: priceCharting.confidence,
+      rawPriceSource: "pricecharting",
+      rawPriceLabel: RAW_PRICE_LABELS.pricecharting,
     };
   }
 
   // Neither real source had this card. Simulate network latency like a
   // real API call, then fall back to mock data -- flagged "low" confidence
-  // since it isn't real.
+  // and a plain "price unavailable" label since it isn't real.
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   return {
@@ -186,6 +214,8 @@ export async function getCardMarketData(
     midGradePrice,
     shippingRoundTrip,
     priceConfidence: "low",
+    rawPriceSource: "mock",
+    rawPriceLabel: RAW_PRICE_LABELS.mock,
   };
 }
 

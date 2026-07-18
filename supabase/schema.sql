@@ -48,10 +48,10 @@ create index idx_gem_rates_card_grader on gem_rates (card_id, grader, scraped_at
 create table market_prices (
   id uuid primary key default uuid_generate_v4(),
   card_id uuid references cards(id) not null,
-  source text not null check (source in ('tcgplayer', 'ebay_sold', 'alt')),
+  source text not null check (source in ('tcgplayer', 'ebay_sold', 'alt', 'pricecharting')),
   condition text not null, -- 'raw', 'PSA 10', 'PSA 9', 'CGC 10', 'CGC Pristine', etc
   price numeric not null,
-  sample_size int default 1, -- number of sales this price is based on (for ebay sold)
+  sample_size int default 1, -- number of sales this price is based on (for ebay sold / pricecharting)
   recorded_at timestamptz default now()
 );
 

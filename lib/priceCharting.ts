@@ -19,15 +19,19 @@
  * (`div.completed-auctions-used`, already present in the static HTML --
  * no JS execution needed) and computes our own 30-day and 90-day median.
  *
- * Caching: `market_prices.source` doesn't currently allow 'pricecharting'
- * as a value (its check constraint only lists 'tcgplayer', 'ebay_sold',
- * 'alt' -- see supabase/schema.sql), so this doesn't persist results
- * there the way lib/tcgplayer.ts does. Instead it uses a short in-memory
- * cache (module scope) to avoid re-scraping the same card on back-to-back
- * requests within one server instance's lifetime -- good enough given
- * PriceCharting has no documented rate limit policy but this app scrapes
- * conservatively everywhere else too.
+ * Caching: results are persisted to `market_prices` (source =
+ * 'pricecharting', condition = 'raw') for DB_CACHE_TTL_HOURS, keyed off
+ * the caller's cardId -- same pattern as lib/tcgplayer.ts. This matters
+ * more here than it does for TCGPlayer: Vercel serverless functions are
+ * frequently cold-started per request, so an in-memory-only cache (kept
+ * below as a same-instance fast path) provided close to no real caching
+ * benefit in production -- nearly every scan was re-scraping PriceCharting
+ * live. `sample_size` stores sales30d (or sales90d if that's all there
+ * was) so a cache hit can still recompute a confidence label without
+ * needing the full sale list.
  */
+import { createServiceRoleClient } from "@/lib/supabase/server";
+
 const BASE_URL = "https://www.pricecharting.com";
 const HEADERS = {
   "User-Agent": "Mozilla/5.0 (compatible; GradeIQ-Bot/1.0; +https://gradeiq.app/bot-info)",
@@ -36,7 +40,8 @@ const HEADERS = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOW_VOLUME_THRESHOLD = 5; // fewer than this many sales in 90 days -> "low" confidence
 const HIGH_CONFIDENCE_THRESHOLD = 10; // 10+ sales in 30 days -> "high" confidence
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const IN_MEMORY_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour -- same-instance fast path only
+const DB_CACHE_TTL_HOURS = 24;
 const ROBOTS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type PriceConfidence = "high" | "medium" | "low";
@@ -155,6 +160,12 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
+function confidenceFor(sales90d: number, sales30d: number): PriceConfidence {
+  if (sales90d < LOW_VOLUME_THRESHOLD) return "low";
+  if (sales30d < HIGH_CONFIDENCE_THRESHOLD) return "medium";
+  return "high";
+}
+
 function summarize(sales: { price: number; timestampMs: number }[]): PriceChartingRawPricing {
   const now = Date.now();
   const prices30 = sales.filter((s) => s.timestampMs >= now - 30 * DAY_MS).map((s) => s.price);
@@ -163,26 +174,81 @@ function summarize(sales: { price: number; timestampMs: number }[]): PriceCharti
   const median30 = median(prices30);
   const median90 = median(prices90);
 
-  let confidence: PriceConfidence;
-  if (prices90.length < LOW_VOLUME_THRESHOLD) {
-    confidence = "low";
-  } else if (prices30.length < HIGH_CONFIDENCE_THRESHOLD) {
-    confidence = "medium";
-  } else {
-    confidence = "high";
-  }
-
   return {
     median30d: median30,
     median90d: median90,
     sales30d: prices30.length,
     sales90d: prices90.length,
-    confidence,
+    confidence: confidenceFor(prices90.length, prices30.length),
     primaryPrice: median30 ?? median90,
   };
 }
 
 const resultCache = new Map<string, { result: PriceChartingRawPricing; fetchedAt: number }>();
+
+async function getDbCachedPrice(cardId: string): Promise<PriceChartingRawPricing | null> {
+  try {
+    const supabase = createServiceRoleClient();
+    const cutoff = new Date(Date.now() - DB_CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString();
+
+    const { data } = await supabase
+      .from("market_prices")
+      .select("price, sample_size, recorded_at")
+      .eq("card_id", cardId)
+      .eq("source", "pricecharting")
+      .eq("condition", "raw")
+      .gte("recorded_at", cutoff)
+      .order("recorded_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!data) return null;
+
+    // The cached row only stores the primary price + a sample count, not
+    // the full 30d/90d sale list -- callers of this module only ever
+    // read .primaryPrice and .confidence, so that's all a cache hit needs
+    // to reconstruct faithfully.
+    const sampleSize = data.sample_size ?? 0;
+    return {
+      median30d: data.price,
+      median90d: data.price,
+      sales30d: sampleSize,
+      sales90d: sampleSize,
+      confidence: confidenceFor(sampleSize, sampleSize),
+      primaryPrice: data.price,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function cacheDbPrice(cardId: string, result: PriceChartingRawPricing): Promise<void> {
+  if (result.primaryPrice === null) return;
+  try {
+    const supabase = createServiceRoleClient();
+    // Supabase's .insert() does NOT throw on a DB-level error (e.g. a
+    // check-constraint violation) -- it resolves with { error } instead,
+    // so that has to be checked explicitly or a failed write is silently
+    // swallowed (confirmed live: an earlier version of this function
+    // never checked `error` and logged nothing at all, even though no
+    // row was actually written).
+    const { error } = await supabase.from("market_prices").insert({
+      card_id: cardId,
+      source: "pricecharting",
+      condition: "raw",
+      price: result.primaryPrice,
+      sample_size: result.sales30d || result.sales90d || 1,
+    });
+    if (error) throw new Error(error.message);
+  } catch (err) {
+    // Non-fatal -- most likely the 'pricecharting' source value hasn't
+    // been added to market_prices' check constraint on this DB yet (see
+    // supabase/schema.sql). The live result this guards is still
+    // returned to the caller either way; only the persistent cache is
+    // lost.
+    console.warn("[pricecharting] could not write DB cache (migration may be pending):", err);
+  }
+}
 
 /**
  * Looks up a real raw-price read for a card from PriceCharting's
@@ -190,20 +256,30 @@ const resultCache = new Map<string, { result: PriceChartingRawPricing; fetchedAt
  * the card's full identity (name + set + card number) rather than just
  * a name -- a bare name matches too many printings, and including the
  * card number in the search query helps PriceCharting's own search
- * disambiguate between them. Returns null if the card can't be found,
- * robots.txt disallows the lookup, or the request fails for any reason
- * -- callers should fall back to mock data or another source in that
- * case.
+ * disambiguate between them.
+ *
+ * Fallback chain: in-memory cache (same warm instance only) -> DB cache
+ * (market_prices, up to DB_CACHE_TTL_HOURS old) -> live scrape. Returns
+ * null if the card can't be found, robots.txt disallows the lookup, or
+ * the request fails for any reason -- callers should fall back to mock
+ * data in that case.
  */
 export async function getPriceChartingRawPricing(
+  cardId: string,
   cardName: string,
   setName: string = "",
   cardNumber: string = ""
 ): Promise<PriceChartingRawPricing | null> {
-  const cacheKey = `${setName}::${cardName}::${cardNumber}`.toLowerCase().trim();
-  const cached = resultCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-    return cached.result;
+  const memCached = resultCache.get(cardId);
+  if (memCached && Date.now() - memCached.fetchedAt < IN_MEMORY_CACHE_TTL_MS) {
+    return memCached.result;
+  }
+
+  const dbCached = await getDbCachedPrice(cardId);
+  if (dbCached) {
+    resultCache.set(cardId, { result: dbCached, fetchedAt: Date.now() });
+    console.log("[pricecharting] DB cache hit for", cardName, "-> primary:", dbCached.primaryPrice);
+    return dbCached;
   }
 
   try {
@@ -231,7 +307,8 @@ export async function getPriceChartingRawPricing(
     }
 
     const result = summarize(sales);
-    resultCache.set(cacheKey, { result, fetchedAt: Date.now() });
+    resultCache.set(cardId, { result, fetchedAt: Date.now() });
+    await cacheDbPrice(cardId, result);
     console.log(
       "[pricecharting] live lookup for",
       cardName,

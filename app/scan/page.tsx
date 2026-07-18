@@ -111,6 +111,15 @@ interface AnalysisResponse {
     asymmetricWearFlag: boolean;
     worstZone: string;
   };
+  market: {
+    rawCost: number;
+    rawMarketPrice: number;
+    topGradePrice: number;
+    midGradePrice: number;
+    priceConfidence: "high" | "medium" | "low";
+    rawPriceSource: "tcgplayer" | "pricecharting" | "mock";
+    rawPriceLabel: string;
+  };
   recommendation: FullRecommendation;
   maxBuyPrice: number | null;
   meta?: {
@@ -119,6 +128,12 @@ interface AnalysisResponse {
     tier: string;
   };
 }
+
+const PRICE_CONFIDENCE_STYLE: Record<"high" | "medium" | "low", string> = {
+  high: "text-moss",
+  medium: "text-ink",
+  low: "text-rust",
+};
 
 function verdictStyle(verdict: string): { label: string; className: string } {
   switch (verdict) {
@@ -501,6 +516,33 @@ export default function ScanPage() {
                 <p className="font-mono text-xs text-slate/50 mt-2">
                   AI confidence: {result.vision.confidence}
                 </p>
+              </div>
+            </section>
+
+            {/* Raw price */}
+            <section>
+              <h2 className="font-display text-lg mb-3">Raw price</h2>
+              <div className="border border-line bg-white/40 p-5 flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <div className="font-display text-3xl text-ink">
+                    ${Math.round(result.market.rawMarketPrice).toLocaleString()}
+                  </div>
+                  <p
+                    className={`font-mono text-xs mt-1 ${
+                      PRICE_CONFIDENCE_STYLE[result.market.priceConfidence]
+                    }`}
+                  >
+                    {result.market.rawPriceLabel}
+                  </p>
+                </div>
+                <a
+                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, language })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
+                >
+                  Verify on eBay
+                </a>
               </div>
             </section>
 
