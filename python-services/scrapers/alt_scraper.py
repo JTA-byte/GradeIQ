@@ -29,9 +29,13 @@ an earlier, unverified draft of this file:
 3. A "Sign up / Log in" modal appears over sold-listings results, but the
    underlying data is still present in the DOM regardless (confirmed by
    inspecting the raw HTML) -- it's a growth-prompt overlay, not an
-   actual access gate. This scraper reads text/attributes directly, so
-   the overlay doesn't block extraction; it best-effort dismisses the
-   modal anyway in case a future version of the site changes that.
+   actual access gate. This scraper deliberately does NOT try to dismiss
+   it: an earlier version clicked a `:near()`-matched close button, which
+   reliably wiped the entire results grid (confirmed directly -- the grid
+   went from 10 items to 0 the instant that click fired), almost
+   certainly because closing the modal triggers a client-side route/state
+   reset that drops the search's query params. Since the data extracts
+   fine with the modal left open, leaving it alone is the correct fix.
 
 4. Real per-result selectors, via `data-testid` (stable) rather than the
    Material-UI `css-xxxxx` hash classes (regenerate on every deploy):
@@ -143,13 +147,6 @@ class AltScraper(BaseSaleScraper):
                 except Exception:
                     self.logger.info(f"No results rendered for '{search_query}' on Alt")
                     return []
-
-                # Best-effort dismiss of the sign-up modal -- see file header.
-                try:
-                    close_button = page.locator('button:near(:text("Sign up / Log in to Alt"))').first
-                    await close_button.click(timeout=2000)
-                except Exception:
-                    pass
 
                 rows = await page.locator(".virtuoso-grid-item").all()
 
