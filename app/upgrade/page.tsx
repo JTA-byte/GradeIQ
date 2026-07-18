@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 
 const FEATURES: { label: string; free: string; pro: string }[] = [
   { label: "Scans per month", free: "3", pro: "Unlimited" },
@@ -103,6 +104,7 @@ export default function UpgradePage() {
           Cancel anytime. Billed monthly via Stripe.
         </p>
       </div>
+      <AppFooter />
     </main>
   );
 }

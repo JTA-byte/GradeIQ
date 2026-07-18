@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 
 interface ScanRecord {
   id: string;
@@ -137,6 +138,7 @@ export default async function ScansPage() {
           })}
         </div>
       </div>
+      <AppFooter />
     </main>
   );
 }

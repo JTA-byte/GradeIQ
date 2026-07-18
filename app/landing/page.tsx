@@ -188,6 +188,12 @@ export default function LandingPage() {
             <a href="/auth/signup" className="hover:text-moss transition-colors">
               Sign up
             </a>
+            <a href="/terms" className="hover:text-moss transition-colors">
+              Terms of Service
+            </a>
+            <a href="/privacy" className="hover:text-moss transition-colors">
+              Privacy Policy
+            </a>
             <span className="text-slate/60">gradeiq.net</span>
           </div>
         </div>

@@ -104,6 +104,7 @@ create table user_profiles (
   scans_used_this_month int default 0,
   scans_reset_at timestamptz default (date_trunc('month', now()) + interval '1 month'),
   stripe_customer_id text,
+  terms_accepted_at timestamptz, -- set by handle_new_user() from signup metadata, see below
   created_at timestamptz default now()
 );
 
@@ -221,11 +222,20 @@ create policy "Anyone can read grader_events" on grader_events for select using 
 
 -- =========================================
 -- Auto-create user_profiles row on signup
+--
+-- Reads terms_accepted_at out of the new user's raw_user_meta_data
+-- (components/AuthForm.tsx passes it as signUp()'s `options.data`) rather
+-- than having the client update user_profiles directly right after
+-- signup -- this function runs `security definer` as part of the same
+-- transaction that creates the auth.users row, so it isn't blocked by
+-- RLS or by there being no active session yet (e.g. while email
+-- confirmation is still pending).
 -- =========================================
 create function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.user_profiles (id) values (new.id);
+  insert into public.user_profiles (id, terms_accepted_at)
+  values (new.id, (new.raw_user_meta_data->>'terms_accepted_at')::timestamptz);
   return new;
 end;
 $$ language plpgsql security definer;

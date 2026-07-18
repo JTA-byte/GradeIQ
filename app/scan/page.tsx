@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRef } from "react";
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 import { GraderSlab } from "@/components/GraderSlab";
 import type { FullRecommendation } from "@/lib/roiEngine";
 import { ebaySoldListingsUrl } from "@/lib/ebayLink";
@@ -455,10 +456,15 @@ export default function ScanPage() {
                   </span>
                 )}
               </div>
+              <p className="mt-4 font-mono text-[11px] text-slate/50 leading-relaxed">
+                GradeIQ provides data for informational purposes only. Grading outcomes are not
+                guaranteed. This is not financial advice.
+              </p>
             </section>
           </div>
         )}
       </div>
+      <AppFooter />
     </main>
   );
 }

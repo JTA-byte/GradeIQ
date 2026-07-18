@@ -12,13 +12,16 @@ interface AuthFormProps {
 export function AuthForm({ mode }: AuthFormProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
   const supabase = createClient();
+  const requiresTerms = mode === "signup" && !termsAccepted;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (requiresTerms) return;
     setLoading(true);
     setMessage(null);
 
@@ -28,6 +31,14 @@ export function AuthForm({ mode }: AuthFormProps) {
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/auth/confirm`,
+          // Written into user_profiles.terms_accepted_at by the
+          // handle_new_user() trigger (see supabase/schema.sql) --
+          // reading it from raw_user_meta_data there, rather than
+          // updating user_profiles directly from the client right after
+          // signUp(), sidesteps a real RLS timing issue: if email
+          // confirmation is required, there's no active session yet for
+          // auth.uid() to satisfy the "update own profile" policy.
+          data: { terms_accepted_at: new Date().toISOString() },
         },
       });
       if (error) {
@@ -51,9 +62,21 @@ export function AuthForm({ mode }: AuthFormProps) {
   }
 
   async function handleGoogleSignIn() {
+    if (requiresTerms) return;
+
+    // Google sign-in also creates a new account when used from the signup
+    // page, so it needs the same acceptance timestamp -- signInWithOAuth
+    // can't attach custom metadata the way signUp() can (it's a redirect
+    // handshake, not a single request), so it's passed through the
+    // callback URL instead and written there. See app/auth/callback/route.ts.
+    const next =
+      mode === "signup"
+        ? `/auth/callback?next=/scan&terms_accepted_at=${encodeURIComponent(new Date().toISOString())}`
+        : "/auth/callback";
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
+      options: { redirectTo: `${window.location.origin}${next}` },
     });
     if (error) setMessage({ type: "error", text: error.message });
   }
@@ -104,6 +127,37 @@ export function AuthForm({ mode }: AuthFormProps) {
             />
           </div>
 
+          {mode === "signup" && (
+            <label className="flex items-start gap-2 font-mono text-xs text-slate cursor-pointer">
+              <input
+                type="checkbox"
+                checked={termsAccepted}
+                onChange={(e) => setTermsAccepted(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                I agree to the{" "}
+                <a
+                  href="/terms"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-moss underline underline-offset-2"
+                >
+                  Terms of Service
+                </a>{" "}
+                and{" "}
+                <a
+                  href="/privacy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-moss underline underline-offset-2"
+                >
+                  Privacy Policy
+                </a>
+              </span>
+            </label>
+          )}
+
           {message && (
             <div
               className={`px-4 py-3 font-mono text-xs ${
@@ -118,7 +172,7 @@ export function AuthForm({ mode }: AuthFormProps) {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || requiresTerms}
             className="w-full bg-ink text-paper font-mono text-sm uppercase tracking-widest py-3 hover:bg-moss transition-colors disabled:opacity-50"
           >
             {loading ? "..." : mode === "login" ? "Sign in" : "Create account"}
@@ -133,7 +187,8 @@ export function AuthForm({ mode }: AuthFormProps) {
 
         <button
           onClick={handleGoogleSignIn}
-          className="w-full border border-line bg-white/60 font-mono text-sm py-3 hover:border-moss hover:bg-white transition-colors flex items-center justify-center gap-2"
+          disabled={requiresTerms}
+          className="w-full border border-line bg-white/60 font-mono text-sm py-3 hover:border-moss hover:bg-white transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
         >
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
             <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>

@@ -1,4 +1,5 @@
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 import { BuySignalsTable } from "@/components/BuySignalsTable";
 import { getBuySignals } from "@/lib/buySignals";
 
@@ -39,7 +40,13 @@ export default async function BuySignalsPage() {
         ) : (
           <BuySignalsTable signals={signals} />
         )}
+
+        <p className="mt-6 font-mono text-[11px] text-slate/50 leading-relaxed">
+          GradeIQ provides data for informational purposes only. Grading outcomes are not
+          guaranteed. This is not financial advice.
+        </p>
       </div>
+      <AppFooter />
     </main>
   );
 }

@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 import { PortfolioManager } from "@/components/PortfolioManager";
 
 export default async function PortfolioPage() {
@@ -39,6 +40,7 @@ export default async function PortfolioPage() {
           <PortfolioManager initialItems={items ?? []} />
         )}
       </div>
+      <AppFooter />
     </main>
   );
 }
