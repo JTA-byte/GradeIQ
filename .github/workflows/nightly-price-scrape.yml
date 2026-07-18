@@ -8,6 +8,11 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    # Well under GitHub's own 360-minute (6-hour) per-job default -- each
+    # batch only handles ~1,000 cards now, so 90 minutes is generous, and
+    # an explicit cap means a stuck batch fails fast instead of quietly
+    # riding all the way to the platform limit.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       # ~6,400 cards split into 7 parallel batches of ~1,000 each -- a
