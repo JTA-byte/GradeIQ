@@ -7,17 +7,63 @@ alt.xyz (formerly onlyalt.com). This targets alt.xyz. Its robots.txt has
 no Disallow rules at all (empty Disallow for every user-agent), so
 nothing here is blocked.
 
-Alt is a modern marketplace/vaulting platform for high-value graded
-cards, focused on recent, high-liquidity modern cards and SIRs -- which
-lines up well with GradeIQ's core market. It aggregates realized sales
-across eBay, MySlabs, and its own Liquid Auctions/Fixed Price listings,
-and shows PSA/BGS pop alongside listings.
+--------------------------------------------------------------------------
+Everything below was verified against the live site with a real headless
+browser (not guessed), including actually searching "Umbreon VMAX" and
+inspecting the rendered DOM. A few things that verification changed from
+an earlier, unverified draft of this file:
 
-NOTE: like the other scrapers, the CSS selectors and search URL below
-are illustrative of the approach -- Alt's exact search/browse URL
-structure wasn't confirmed against a live DOM (no browser available in
-this environment). Inspect a live search result on alt.xyz and adjust
-before relying on this for real data.
+1. Search is `/browse?query=<url-encoded query>` -- confirmed by watching
+   the site's own search box navigate there. The query value must be
+   percent-encoded as %20 for spaces (`urllib.parse.quote`, used below);
+   a literal "+" is NOT treated as a space by this app's router and
+   silently returns the generic unfiltered browse page instead.
+
+2. `soldListings=true&sortBy=newest_first` is required to see actual
+   completed sales. Without it, `/browse` shows *live, unsold* auctions --
+   their "price" is a current/starting bid on an active auction, not a
+   sale. Recording that as a SaleRecord would misrepresent in-progress
+   auctions as completed sales, so this scraper only ever queries the
+   sold-listings view.
+
+3. A "Sign up / Log in" modal appears over sold-listings results, but the
+   underlying data is still present in the DOM regardless (confirmed by
+   inspecting the raw HTML) -- it's a growth-prompt overlay, not an
+   actual access gate. This scraper reads text/attributes directly, so
+   the overlay doesn't block extraction; it best-effort dismisses the
+   modal anyway in case a future version of the site changes that.
+
+4. Real per-result selectors, via `data-testid` (stable) rather than the
+   Material-UI `css-xxxxx` hash classes (regenerate on every deploy):
+   - `.virtuoso-grid-item` -- one result card (the grid is a virtualized
+     react-virtuoso list, so only ~15 results are ever in the DOM at
+     once; scrolling to load more isn't implemented here)
+   - `[data-testid^="subject-card-number-"]` -- e.g. "Umbreon Vmax #215"
+   - `[data-testid^="grade-"]` -- e.g. "PSA 9" (grader + grade combined)
+   - `[data-testid^="sold-price-"]` -- e.g. "$2,658"
+   - `img[src*="auction-house-logos"]` -- the marketplace logo; its `alt`
+     text (e.g. "eBay", "Fanatics Collect") identifies where the sale
+     actually happened. Alt aggregates comps from multiple marketplaces,
+     it doesn't only show its own native sales.
+   - Sale date has no dedicated testid -- it renders as "Sold • <date>"
+     in plain text near the price, so it's pulled via regex over the
+     card's full text instead.
+
+5. Population ("POP 4,403") is NOT present on the search grid at all --
+   only on individual /itm/{uuid} detail pages (`data-testid="card-pops"`
+   or the "Pop" span inside `data-testid="grading-company-grade"`).
+   SaleRecord has no field for population (that belongs in `gem_rates`,
+   populated by the PSA/CGC/BGS/TAG pop scrapers, not here), and visiting
+   every result's detail page would multiply requests per search --
+   so this is documented as verified but intentionally not fetched.
+
+6. market_sales.source only allows ('ebay_sold', 'pricecharting', 'alt').
+   A sale is recorded as "ebay_sold" when the marketplace logo says
+   "eBay", and "alt" for every other marketplace Alt aggregates from
+   (Fanatics Collect, Goldin, etc., or a genuine native Alt sale) --
+   this keeps every record valid against the existing check constraint
+   without needing a schema change.
+--------------------------------------------------------------------------
 """
 from __future__ import annotations
 
@@ -34,7 +80,23 @@ from scrapers.base_scraper import (
     parse_date_safe,
 )
 
-GRADE_PATTERN = re.compile(r"\b(PSA|BGS|CGC|SGC)\s*[- ]?(10|9\.5|9|8)\b", re.IGNORECASE)
+GRADE_PATTERN = re.compile(r"\b(PSA|BGS|CGC|SGC)\s*[- ]?(10|9\.5|9|8|PRI|BL)\b", re.IGNORECASE)
+DATE_PATTERN = re.compile(r"Sold\D*?([A-Za-z]{3}\s+\d{1,2},\s+\d{4})")
+PRICE_PATTERN = re.compile(r"[\d,]+\.?\d*")
+
+
+def _is_crash_error(err: Exception) -> bool:
+    """
+    Headless Chromium occasionally crashes mid-page (observed directly
+    while testing this scraper). A crashed page makes every subsequent
+    locator call on it fail too -- those failures must NOT be swallowed
+    as "this row doesn't have this field" (a normal, expected case for
+    e.g. a live auction row with no sold-price), or the whole page's
+    results silently come back empty instead of triggering a retry with
+    a fresh browser via scrape_with_retry.
+    """
+    text = str(err).lower()
+    return "crashed" in text or "target closed" in text or "connection closed" in text
 
 
 class AltScraper(BaseSaleScraper):
@@ -46,8 +108,11 @@ class AltScraper(BaseSaleScraper):
         super().__init__(rate_limiter=RateLimiter(min_delay_seconds=3.0))
 
     async def fetch_sales(self, card_name: str, set_name: str) -> list[SaleRecord]:
-        search_query = f"{set_name} {card_name}"
-        search_url = f"{self.base_url}/browse?query={quote(search_query)}"
+        search_query = f"{set_name} {card_name}".strip()
+        search_url = (
+            f"{self.base_url}/browse?query={quote(search_query)}"
+            "&soldListings=true&sortBy=newest_first"
+        )
 
         if not check_robots_allowed(search_url):
             self.logger.warning(f"robots.txt disallows {search_url}, skipping")
@@ -64,49 +129,61 @@ class AltScraper(BaseSaleScraper):
             page = await context.new_page()
 
             try:
-                await page.goto(search_url, wait_until="networkidle", timeout=15000)
+                await page.goto(search_url, wait_until="load", timeout=20000)
+                await page.wait_for_timeout(4000)
 
-                # Illustrative selector -- inspect the live DOM and adjust.
-                await page.wait_for_selector(
-                    "[data-testid='card-listing'], .listing-card, .sale-history-row",
-                    timeout=10000,
-                )
+                # Best-effort dismiss of the sign-up modal -- see file header.
+                try:
+                    close_button = page.locator('button:near(:text("Sign up / Log in to Alt"))').first
+                    await close_button.click(timeout=2000)
+                except Exception:
+                    pass
 
-                rows = await page.locator(
-                    "[data-testid='card-listing'], .listing-card, .sale-history-row"
-                ).all()
+                try:
+                    await page.wait_for_selector(".virtuoso-grid-item", timeout=10000)
+                except Exception:
+                    self.logger.info(f"No results rendered for '{search_query}' on Alt")
+                    return []
+
+                rows = await page.locator(".virtuoso-grid-item").all()
 
                 records: list[SaleRecord] = []
                 for row in rows:
                     try:
-                        title = await row.locator(
-                            "[data-testid='listing-title'], .listing-title, .card-name"
-                        ).inner_text()
-                    except Exception:
-                        continue
+                        grade_text = await row.locator('[data-testid^="grade-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        continue  # this row just doesn't have a grade element
 
-                    match = GRADE_PATTERN.search(title)
+                    match = GRADE_PATTERN.search(grade_text)
                     if not match:
                         continue
                     grader = match.group(1).upper()
                     grade = match.group(2)
 
                     try:
-                        price_text = await row.locator(
-                            "[data-testid='sale-price'], .sale-price, .listing-price"
-                        ).inner_text()
-                    except Exception:
-                        continue
+                        price_text = await row.locator('[data-testid^="sold-price-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        continue  # a live/unsold auction row has no sold-price element -- expected, skip
 
-                    price_match = re.search(r"[\d,]+\.?\d*", price_text.replace(",", ""))
+                    price_match = PRICE_PATTERN.search(price_text.replace(",", ""))
                     if not price_match:
                         continue
 
-                    date_text = ""
+                    row_text = await row.inner_text()
+                    date_match = DATE_PATTERN.search(row_text)
+                    sale_date = parse_date_safe(date_match.group(1) if date_match else "")
+
+                    source = "alt"
                     try:
-                        date_text = await row.locator(
-                            "[data-testid='sale-date'], .sale-date"
-                        ).inner_text()
+                        logo_alt = await row.locator('img[src*="auction-house-logos"]').first.get_attribute(
+                            "alt"
+                        )
+                        if logo_alt and logo_alt.strip().lower() == "ebay":
+                            source = "ebay_sold"
                     except Exception:
                         pass
 
@@ -117,12 +194,18 @@ class AltScraper(BaseSaleScraper):
                             grader=grader,
                             grade=grade,
                             sale_price=float(price_match.group(0)),
-                            sale_date=parse_date_safe(date_text),
-                            source="alt",
+                            sale_date=sale_date,
+                            source=source,
                         )
                     )
 
                 return records
 
             finally:
-                await browser.close()
+                # If the page already crashed, close() itself can raise --
+                # swallow that so it doesn't shadow a real exception being
+                # propagated out of the try block above.
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
