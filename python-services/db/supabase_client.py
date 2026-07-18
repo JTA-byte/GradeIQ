@@ -40,12 +40,37 @@ def get_cards_to_scrape(client: Client, limit: Optional[int] = None) -> list[dic
     For the nightly job, you'd typically scrape every card, or prioritize
     cards that haven't been scraped recently / are flagged high-priority
     by user scan volume. This starts simple: return all cards.
+
+    Paginates via .range() rather than a single .select().execute() call.
+    PostgREST (Supabase's API layer) caps any unpaginated request at 1000
+    rows by default (its `db-max-rows` setting) -- that cap is enforced
+    server-side regardless of what the client sends, so `limit=None` here
+    was silently still capped at the first 1000 rows in the `cards` table
+    without this loop.
     """
-    query = client.table("cards").select("id, name, set_name")
-    if limit:
-        query = query.limit(limit)
-    response = query.execute()
-    return response.data
+    page_size = 1000
+    all_cards: list[dict] = []
+    offset = 0
+
+    while True:
+        remaining = page_size if limit is None else min(page_size, limit - len(all_cards))
+        if remaining <= 0:
+            break
+
+        response = (
+            client.table("cards")
+            .select("id, name, set_name")
+            .range(offset, offset + remaining - 1)
+            .execute()
+        )
+        page = response.data
+        all_cards.extend(page)
+
+        if len(page) < remaining:
+            break  # last page -- fewer rows came back than we asked for
+        offset += remaining
+
+    return all_cards
 
 
 def write_pop_record(client: Client, card_id: str, record: PopRecord) -> None:
