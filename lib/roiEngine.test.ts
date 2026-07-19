@@ -168,6 +168,44 @@ console.log("\nTest 5: Recommendations should always be sorted by net ROI descen
   );
 }
 
+console.log(
+  "\nTest 6: Low raw price + high grading fees -> should recommend sell_raw even with a great gem rate"
+);
+{
+  // A $25 raw card: even a stellar gem rate/vision score doesn't make
+  // grading worthwhile when the fee alone (PSA $150) dwarfs what the
+  // card is worth raw. rawCost === rawMarketPrice here (both $25) is the
+  // real PriceCharting-derived case -- see lib/mockDataService.ts.
+  const market: CardMarketData = {
+    rawCost: 25,
+    rawMarketPrice: 25,
+    topGradePrice: 100,
+    midGradePrice: 50,
+    shippingRoundTrip: 20,
+  };
+  const gemRates: GemRateData = {
+    psa: 30,
+    cgc: 30,
+    bgs: 30,
+    tag: 30,
+    totalPopByGrader: { psa: 500, cgc: 500, bgs: 500, tag: 500 },
+  };
+  const vision: VisionAssessment = {
+    centeringPct: 50,
+    surfaceScore: 9.5,
+    edgeScore: 9.5,
+    cornerScore: 9.5,
+    overallScore: 9.5,
+  };
+  const result = getGraderRecommendations(market, gemRates, vision);
+  assert(result.verdict === "sell_raw", `verdict should be 'sell_raw', got '${result.verdict}'`);
+  assert(result.bestOption !== null, "should still surface a best option (for maxBuyPrice), just not as a 'grade' verdict");
+  assert(
+    (result.bestOption?.netROI ?? 1) <= 0,
+    `best option net ROI should be <= 0, got ${result.bestOption?.netROI}`
+  );
+}
+
 console.log(`\n${"=".repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
 console.log("=".repeat(50));

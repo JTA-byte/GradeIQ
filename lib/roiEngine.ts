@@ -256,7 +256,19 @@ export function getGraderRecommendations(
   let verdict: FullRecommendation["verdict"];
   let verdictReason: string;
 
-  if (maxGemRate < 10 && !bestOption) {
+  // A grader clearing the vision gate doesn't mean grading actually pays --
+  // a low raw-value card (e.g. $25) can still lose money against a $150+
+  // fee even with a great gem rate and vision score. Check this before the
+  // gem-rate-driven branches below, since those would otherwise recommend
+  // "grade" purely off gem rate/vision confidence with no regard for
+  // whether the expected payout covers the cost of grading it. bestOption
+  // itself is left as-is (not nulled) -- maxBuyPrice still gets computed
+  // off it in app/api/analyze/route.ts, which is exactly the useful "here's
+  // what you'd need to pay instead" number for a card that fails this check.
+  if (bestOption && bestOption.netROI <= 0) {
+    verdict = "sell_raw";
+    verdictReason = `Even ${bestOption.graderName} (the best-passing option) doesn't clear a profitable return after fees -- expected net ROI is $${bestOption.netROI} on a $${market.rawCost} raw cost. The raw market price doesn't leave enough margin over grading costs to justify sending this one in.`;
+  } else if (maxGemRate < 10 && !bestOption) {
     verdict = "no_grade";
     verdictReason =
       "Gem rate is below 10% across all graders. This card type historically does not gem well regardless of condition -- likely a factory print consistency issue specific to this card or set.";

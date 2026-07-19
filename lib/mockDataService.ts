@@ -213,6 +213,19 @@ export async function getCardMarketData(
   );
 
   if (priceCharting && priceCharting.primaryPrice !== null && priceCharting.primaryPrice > 0) {
+    // rawCost and rawMarketPrice are deliberately the same number here --
+    // PriceCharting gives one real median sale price, not a distinct
+    // buy-low/sell-high spread the way TCGPlayer's lowPrice/marketPrice
+    // pair does above. Fabricating a spread just to make
+    // getGraderRecommendations()'s rawSaleProfit ("sell raw instead")
+    // read as a nonzero number would misrepresent real data with a made-
+    // up number. $0 there is the mathematically honest answer: buying
+    // this copy at today's market price and immediately reselling it raw
+    // nets $0 by definition. What actually needs to reflect a low raw
+    // price correctly is the *grading* verdict (is grading worth it
+    // relative to this raw price and the grader's fee), which is a
+    // netROI check in roiEngine.ts's getGraderRecommendations(), not this
+    // rawCost/rawMarketPrice pairing.
     return {
       rawCost: priceCharting.primaryPrice,
       rawMarketPrice: priceCharting.primaryPrice,
