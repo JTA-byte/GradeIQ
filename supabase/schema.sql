@@ -197,11 +197,124 @@ create trigger portfolio_items_updated_at
   for each row execute procedure set_portfolio_item_updated_at();
 
 -- =========================================
+-- PRICE_ALERTS: user-created "notify me when X" price watches.
+-- card_name/set_name are denormalized alongside card_id so alert emails
+-- and the alerts page don't need a join back to `cards` just to show
+-- what the alert is for.
+--
+-- Checked every 6 hours by python-services/jobs/check_price_alerts.py
+-- (GitHub Actions cron) against the latest cached raw price in
+-- market_prices for that card. is_active flips to false and
+-- triggered_at is stamped the moment an alert fires -- a "notify me
+-- when it drops below $X" alert is a one-time trigger, not a repeating
+-- notification every 6 hours once the condition is already true.
+-- =========================================
+create table price_alerts (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid references auth.users(id) not null,
+  card_id uuid references cards(id) not null,
+  card_name text not null,
+  set_name text not null,
+  target_price numeric not null,
+  alert_type text not null check (alert_type in ('below_price', 'above_price')),
+  is_active boolean not null default true,
+  triggered_at timestamptz, -- null until the alert fires
+  triggered_price numeric,  -- the actual price observed when it fired, for the alert email/history
+  created_at timestamptz default now()
+);
+
+create index idx_price_alerts_user on price_alerts (user_id, created_at desc);
+create index idx_price_alerts_active on price_alerts (card_id) where is_active = true;
+
+-- =========================================
+-- PRICE_TRENDS: per-card trend flag comparing the last 30 days of
+-- market_sales against the 31-60-days-ago window, split into graded
+-- vs raw averages.
+--
+-- This is a reference view for direct SQL/BI use (e.g. "show me every
+-- card currently trending up"). The app itself does NOT query this
+-- view -- lib/buySignals.ts computes the same trend independently in
+-- TypeScript from sales rows it has already fetched, so the UI keeps
+-- working even before this view is applied to the live DB. Keep the
+-- thresholds here (20% graded move, 10% raw-stability band) in sync
+-- with TREND_THRESHOLD_PCT/RAW_STABLE_THRESHOLD_PCT in that file if
+-- either changes.
+--
+-- A card needs at least one graded sale in both the recent and prior
+-- windows to get a trend other than 'insufficient_data' -- there's
+-- nothing to compare a % change against otherwise.
+-- =========================================
+create view price_trends as
+with graded_recent as (
+  select card_id, avg(sale_price) as avg_price, count(*) as sale_count
+  from market_sales
+  where grader is not null and sale_date >= now() - interval '30 days'
+  group by card_id
+),
+graded_prior as (
+  select card_id, avg(sale_price) as avg_price, count(*) as sale_count
+  from market_sales
+  where grader is not null
+    and sale_date >= now() - interval '60 days'
+    and sale_date < now() - interval '30 days'
+  group by card_id
+),
+raw_recent as (
+  select card_id, avg(sale_price) as avg_price
+  from market_sales
+  where grader is null and sale_date >= now() - interval '30 days'
+  group by card_id
+),
+raw_prior as (
+  select card_id, avg(sale_price) as avg_price
+  from market_sales
+  where grader is null
+    and sale_date >= now() - interval '60 days'
+    and sale_date < now() - interval '30 days'
+  group by card_id
+)
+select
+  c.id as card_id,
+  c.name as card_name,
+  c.set_name,
+  c.language,
+  gr.avg_price as graded_recent_avg,
+  gp.avg_price as graded_prior_avg,
+  round((
+    (gr.avg_price - gp.avg_price) / nullif(gp.avg_price, 0) * 100
+  )::numeric, 1) as graded_change_pct,
+  rr.avg_price as raw_recent_avg,
+  rp.avg_price as raw_prior_avg,
+  round((
+    (rr.avg_price - rp.avg_price) / nullif(rp.avg_price, 0) * 100
+  )::numeric, 1) as raw_change_pct,
+  case
+    when gp.avg_price is null or gr.avg_price is null then 'insufficient_data'
+    when (gr.avg_price - gp.avg_price) / nullif(gp.avg_price, 0) * 100 >= 20
+      and (
+        rp.avg_price is null
+        or abs((rr.avg_price - rp.avg_price) / nullif(rp.avg_price, 0) * 100) < 10
+      )
+      then 'trending_up'
+    when (gr.avg_price - gp.avg_price) / nullif(gp.avg_price, 0) * 100 <= -20
+      then 'cooling'
+    else 'stable'
+  end as trend
+from cards c
+join graded_recent gr on gr.card_id = c.id
+join graded_prior gp on gp.card_id = c.id
+left join raw_recent rr on rr.card_id = c.id
+left join raw_prior rp on rp.card_id = c.id;
+
+grant select on price_trends to anon, authenticated;
+
+-- =========================================
 -- Row Level Security
 -- =========================================
 alter table user_profiles enable row level security;
 alter table scans enable row level security;
 alter table portfolio_items enable row level security;
+alter table price_alerts enable row level security;
 
 create policy "Users can view own profile"
   on user_profiles for select using (auth.uid() = id);
@@ -226,6 +339,18 @@ create policy "Users can update own portfolio items"
 
 create policy "Users can delete own portfolio items"
   on portfolio_items for delete using (auth.uid() = user_id);
+
+create policy "Users can view own price alerts"
+  on price_alerts for select using (auth.uid() = user_id);
+
+create policy "Users can insert own price alerts"
+  on price_alerts for insert with check (auth.uid() = user_id);
+
+create policy "Users can update own price alerts"
+  on price_alerts for update using (auth.uid() = user_id);
+
+create policy "Users can delete own price alerts"
+  on price_alerts for delete using (auth.uid() = user_id);
 
 -- Public reference tables stay readable by anyone (cards, gem_rates, market_prices, grader_events)
 alter table cards enable row level security;

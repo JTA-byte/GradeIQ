@@ -1,11 +1,13 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { BuySignal, PriceConfidence } from "@/lib/buySignals";
+import { useSearchParams } from "next/navigation";
+import type { BuySignal, PriceConfidence, PriceTrend } from "@/lib/buySignals";
 import { ebayGradedSoldListingsUrl, ebayRawSoldListingsUrl } from "@/lib/ebayLink";
 import { buildSaleListingUrl } from "@/lib/saleListingLink";
 
 type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice" | "gapDollars";
+type TrendFilter = "all" | "trending_up" | "stable" | "cooling";
 
 function iqScoreColor(score: number): string {
   if (score >= 70) return "bg-moss text-paper";
@@ -19,6 +21,12 @@ const CONFIDENCE_STYLE: Record<PriceConfidence, string> = {
   low: "bg-rust/10 text-rust border border-rust",
 };
 
+const TREND_BADGE: Record<PriceTrend, { label: string; className: string }> = {
+  trending_up: { label: "🔥 Trending Up", className: "bg-gold/20 text-ink border border-gold" },
+  cooling: { label: "❄️ Cooling", className: "bg-slate/10 text-slate border border-slate/40" },
+  stable: { label: "→ Stable", className: "text-slate/60" },
+};
+
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
@@ -28,11 +36,18 @@ function formatFullDate(iso: string): string {
 }
 
 export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
+  const searchParams = useSearchParams();
+  const initialSet = searchParams.get("set");
+
   const [minIq, setMinIq] = useState(0);
   const [maxIq, setMaxIq] = useState(100);
   const [graderFilter, setGraderFilter] = useState<string>("all");
-  const [setFilter, setSetFilter] = useState<string>("all");
+  const [setFilter, setSetFilter] = useState<string>(initialSet ?? "all");
   const [sortKey, setSortKey] = useState<SortKey>("iqScore");
+  const [minRawPrice, setMinRawPrice] = useState("");
+  const [maxRawPrice, setMaxRawPrice] = useState("");
+  const [minVolumeOnly, setMinVolumeOnly] = useState(false);
+  const [trendFilter, setTrendFilter] = useState<TrendFilter>("all");
 
   const graders = useMemo(
     () => Array.from(new Set(signals.map((s) => s.bestGrader))).sort(),
@@ -44,18 +59,32 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
   );
 
   const filtered = useMemo(() => {
+    const minPrice = minRawPrice.trim() ? Number(minRawPrice) : null;
+    const maxPrice = maxRawPrice.trim() ? Number(maxRawPrice) : null;
+
     return signals
       .filter((s) => s.iqScore >= minIq && s.iqScore <= maxIq)
       .filter((s) => graderFilter === "all" || s.bestGrader === graderFilter)
       .filter((s) => setFilter === "all" || s.setName === setFilter)
+      .filter((s) => minPrice === null || s.rawMarketPrice >= minPrice)
+      .filter((s) => maxPrice === null || s.rawMarketPrice <= maxPrice)
+      .filter((s) => !minVolumeOnly || s.recentSaleCount90d >= 5)
+      .filter((s) => trendFilter === "all" || s.trend === trendFilter)
       .sort((a, b) => b[sortKey] - a[sortKey]);
-  }, [signals, minIq, maxIq, graderFilter, setFilter, sortKey]);
+  }, [signals, minIq, maxIq, graderFilter, setFilter, sortKey, minRawPrice, maxRawPrice, minVolumeOnly, trendFilter]);
 
   const summary = useMemo(() => {
     if (signals.length === 0) return null;
     const avgGap = signals.reduce((sum, s) => sum + s.gapDollars, 0) / signals.length;
     const best = signals.reduce((a, b) => (b.iqScore > a.iqScore ? b : a));
     return { count: signals.length, avgGap, bestName: best.cardName };
+  }, [signals]);
+
+  const trendingNow = useMemo(() => {
+    return signals
+      .filter((s) => s.trend === "trending_up")
+      .sort((a, b) => (b.gradedPriceChangePct ?? 0) - (a.gradedPriceChangePct ?? 0))
+      .slice(0, 5);
   }, [signals]);
 
   return (
@@ -73,6 +102,26 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
           <span>
             Best opportunity: <span className="text-ink font-bold">{summary.bestName}</span>
           </span>
+        </div>
+      )}
+
+      {trendingNow.length > 0 && (
+        <div className="mb-6 border border-gold bg-gold/10 p-4">
+          <h3 className="font-display text-lg mb-3">🔥 Trending Now</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+            {trendingNow.map((s) => (
+              <div key={`trending-${s.cardId}`} className="font-mono text-xs bg-white/60 border border-line p-2">
+                <div className="font-display text-sm truncate" title={s.cardName}>
+                  {s.cardName}
+                </div>
+                <div className="text-slate/70 truncate">{s.setName}</div>
+                <div className="text-moss font-bold mt-1">
+                  {s.gradedPriceChangePct !== null && s.gradedPriceChangePct >= 0 ? "+" : ""}
+                  {s.gradedPriceChangePct}%
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -153,6 +202,56 @@ export function BuySignalsTable({ signals }: { signals: BuySignal[] }) {
             <option value="maxBuyPrice">Max buy price</option>
           </select>
         </div>
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+            Raw price min
+          </label>
+          <input
+            type="number"
+            min={0}
+            placeholder="$0"
+            value={minRawPrice}
+            onChange={(e) => setMinRawPrice(e.target.value)}
+            className="w-24 border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+          />
+        </div>
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+            Raw price max
+          </label>
+          <input
+            type="number"
+            min={0}
+            placeholder="No limit"
+            value={maxRawPrice}
+            onChange={(e) => setMaxRawPrice(e.target.value)}
+            className="w-24 border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+          />
+        </div>
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+            Trend
+          </label>
+          <select
+            value={trendFilter}
+            onChange={(e) => setTrendFilter(e.target.value as TrendFilter)}
+            className="border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+          >
+            <option value="all">All trends</option>
+            <option value="trending_up">🔥 Trending up</option>
+            <option value="stable">→ Stable</option>
+            <option value="cooling">❄️ Cooling</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-2 font-mono text-xs text-slate pb-1.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={minVolumeOnly}
+            onChange={(e) => setMinVolumeOnly(e.target.checked)}
+            className="accent-moss"
+          />
+          5+ sales only
+        </label>
         <span className="font-mono text-xs text-slate/60 ml-auto">
           {filtered.length} of {signals.length} cards
         </span>
@@ -223,6 +322,9 @@ function HowToUseSection() {
 function BuySignalCard({ signal: s }: { signal: BuySignal }) {
   const [salesOpen, setSalesOpen] = useState(false);
   const [watchlistState, setWatchlistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [alertOpen, setAlertOpen] = useState(false);
+  const [alertPrice, setAlertPrice] = useState(() => String(Math.round(s.maxBuyPrice)));
+  const [alertState, setAlertState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
   const cardIdentifier = {
     cardName: s.cardName,
@@ -256,6 +358,36 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
     }
   }
 
+  async function createPriceAlert() {
+    const price = Number(alertPrice);
+    if (!alertPrice || Number.isNaN(price) || price <= 0) {
+      setAlertState("error");
+      return;
+    }
+    setAlertState("saving");
+    try {
+      const res = await fetch("/api/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cardId: s.cardId,
+          cardName: s.cardName,
+          setName: s.setName,
+          targetPrice: price,
+          alertType: "below_price",
+        }),
+      });
+      if (res.status === 401) {
+        window.location.href = "/auth/login";
+        return;
+      }
+      if (!res.ok) throw new Error("failed");
+      setAlertState("saved");
+    } catch {
+      setAlertState("error");
+    }
+  }
+
   return (
     <div className="border border-line bg-white/40 p-5 flex flex-col gap-4">
       {/* Header */}
@@ -273,6 +405,12 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           <p className="font-mono text-xs text-slate mt-1">
             Target: <span className="text-ink font-bold">{s.targetGradeLabel}</span>
           </p>
+          <span
+            className={`inline-block mt-1.5 font-mono text-[10px] uppercase tracking-widest px-2 py-0.5 ${TREND_BADGE[s.trend].className}`}
+          >
+            {TREND_BADGE[s.trend].label}
+            {s.gradedPriceChangePct !== null && ` (${s.gradedPriceChangePct >= 0 ? "+" : ""}${s.gradedPriceChangePct}%)`}
+          </span>
         </div>
         <span className={`font-mono text-sm font-bold px-2.5 py-1 whitespace-nowrap ${iqScoreColor(s.iqScore)}`}>
           {s.iqScore}
@@ -382,7 +520,43 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
                 ? "Failed -- retry"
                 : "Add to watchlist"}
         </button>
+        <button
+          onClick={() => setAlertOpen((v) => !v)}
+          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+        >
+          Set Price Alert
+        </button>
       </div>
+
+      {alertOpen && (
+        <div className="flex flex-wrap items-end gap-2 border-t border-line pt-3">
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+              Notify when raw price drops below
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={alertPrice}
+              onChange={(e) => setAlertPrice(e.target.value)}
+              className="w-28 border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+            />
+          </div>
+          <button
+            onClick={createPriceAlert}
+            disabled={alertState === "saving" || alertState === "saved"}
+            className="font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-2 hover:bg-moss transition-colors disabled:opacity-50"
+          >
+            {alertState === "saved"
+              ? "Alert created"
+              : alertState === "saving"
+                ? "Saving..."
+                : alertState === "error"
+                  ? "Failed -- retry"
+                  : "Create alert"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

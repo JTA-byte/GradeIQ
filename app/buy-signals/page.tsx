@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { AppHeader } from "@/components/AppHeader";
 import { AppFooter } from "@/components/AppFooter";
 import { BuySignalsTable } from "@/components/BuySignalsTable";
@@ -43,7 +44,9 @@ export default async function BuySignalsPage() {
             </p>
           </div>
         ) : (
-          <BuySignalsTable signals={signals} />
+          <Suspense fallback={<p className="font-mono text-sm text-slate">Loading...</p>}>
+            <BuySignalsTable signals={signals} />
+          </Suspense>
         )}
 
         <p className="mt-6 font-mono text-[11px] text-slate/50 leading-relaxed">

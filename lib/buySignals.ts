@@ -85,6 +85,7 @@ const HIGH_CONFIDENCE_THRESHOLD = 10;
 const RECENT_SALE_WINDOW_DAYS = 90;
 
 export type PriceConfidence = "high" | "medium" | "low";
+export type PriceTrend = "trending_up" | "cooling" | "stable";
 
 export interface RecentSaleDisplay {
   grader: string | null; // null for a raw (ungraded) sale
@@ -123,6 +124,8 @@ export interface BuySignal {
   priceConfidence: PriceConfidence;
   lastSaleDate: string | null;
   recentSales: RecentSaleDisplay[];
+  trend: PriceTrend;
+  gradedPriceChangePct: number | null; // last 30d vs 31-60d avg graded sale price, null if not enough history either side
 }
 
 interface MarketSaleRow {
@@ -253,6 +256,7 @@ function evaluateCardForGrader(
   saleCount: number;
   recentSaleCount90d: number;
   lastSaleDate: string | null;
+  topSalesRows: MarketSaleRow[];
 } | null {
   const graderConfig = GRADERS.find((g) => g.id === graderCode.toLowerCase());
   if (!graderConfig) return null; // not one of GradeIQ's 4 supported graders (e.g. SGC)
@@ -351,6 +355,7 @@ function evaluateCardForGrader(
     saleCount: topSales.length,
     recentSaleCount90d,
     lastSaleDate,
+    topSalesRows: topSales,
   };
 }
 
@@ -358,6 +363,71 @@ function confidenceFor(recentSaleCount90d: number): PriceConfidence {
   if (recentSaleCount90d < LOW_VOLUME_THRESHOLD) return "low";
   if (recentSaleCount90d < HIGH_CONFIDENCE_THRESHOLD) return "medium";
   return "high";
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const TREND_WINDOW_DAYS = 30;
+const TREND_THRESHOLD_PCT = 20; // graded price must move at least this much to be trending/cooling
+const RAW_STABLE_THRESHOLD_PCT = 10; // raw price must stay within this band to count as "hasn't moved"
+
+/**
+ * Trend detection: last 30 days of graded sales vs. the 30 days before
+ * that. "Trending up" requires the graded price to be up 20%+ while the
+ * raw price either hasn't moved (within 10%) or there's no raw data to
+ * compare -- the whole point is to surface cards where the market is
+ * repricing the GRADED premium specifically, not just a card that's
+ * generally getting more expensive (raw and graded both up together
+ * isn't the same signal). "Cooling" only looks at the graded side --
+ * a 20%+ drop is worth flagging regardless of what raw is doing.
+ */
+function computeTrend(
+  gradedTopSales: { sale_price: number; sale_date: string }[],
+  rawSales: { sale_price: number; sale_date: string }[]
+): { trend: PriceTrend; gradedPriceChangePct: number | null } {
+  const now = Date.now();
+  const recentCutoff = now - TREND_WINDOW_DAYS * DAY_MS;
+  const priorCutoff = now - 2 * TREND_WINDOW_DAYS * DAY_MS;
+
+  const inRecentWindow = (s: { sale_date: string }) => new Date(s.sale_date).getTime() >= recentCutoff;
+  const inPriorWindow = (s: { sale_date: string }) => {
+    const t = new Date(s.sale_date).getTime();
+    return t >= priorCutoff && t < recentCutoff;
+  };
+
+  const gradedRecent = gradedTopSales.filter(inRecentWindow);
+  const gradedPrior = gradedTopSales.filter(inPriorWindow);
+
+  if (gradedRecent.length === 0 || gradedPrior.length === 0) {
+    return { trend: "stable", gradedPriceChangePct: null };
+  }
+
+  const gradedRecentAvg = average(gradedRecent.map((s) => s.sale_price));
+  const gradedPriorAvg = average(gradedPrior.map((s) => s.sale_price));
+  const gradedPriceChangePct =
+    gradedPriorAvg > 0 ? ((gradedRecentAvg - gradedPriorAvg) / gradedPriorAvg) * 100 : 0;
+
+  const rawRecent = rawSales.filter(inRecentWindow);
+  const rawPrior = rawSales.filter(inPriorWindow);
+
+  let rawPriceChangePct: number | null = null;
+  if (rawRecent.length > 0 && rawPrior.length > 0) {
+    const rawRecentAvg = average(rawRecent.map((s) => s.sale_price));
+    const rawPriorAvg = average(rawPrior.map((s) => s.sale_price));
+    rawPriceChangePct = rawPriorAvg > 0 ? ((rawRecentAvg - rawPriorAvg) / rawPriorAvg) * 100 : null;
+  }
+
+  const rounded = Math.round(gradedPriceChangePct * 10) / 10;
+
+  if (
+    gradedPriceChangePct >= TREND_THRESHOLD_PCT &&
+    (rawPriceChangePct === null || Math.abs(rawPriceChangePct) < RAW_STABLE_THRESHOLD_PCT)
+  ) {
+    return { trend: "trending_up", gradedPriceChangePct: rounded };
+  }
+  if (gradedPriceChangePct <= -TREND_THRESHOLD_PCT) {
+    return { trend: "cooling", gradedPriceChangePct: rounded };
+  }
+  return { trend: "stable", gradedPriceChangePct: rounded };
 }
 
 /**
@@ -521,6 +591,7 @@ export async function getBuySignals(): Promise<BuySignal[]> {
       const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
       const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
       const gapDollars = best.topGradePrice - best.rawMarketPrice;
+      const { trend, gradedPriceChangePct } = computeTrend(best.topSalesRows, rawSales);
 
       const recentSales: RecentSaleDisplay[] = [...gradedSales]
         .sort((a, b) => new Date(b.sale_date).getTime() - new Date(a.sale_date).getTime())
@@ -571,6 +642,8 @@ export async function getBuySignals(): Promise<BuySignal[]> {
         priceConfidence: confidenceFor(best.recentSaleCount90d),
         lastSaleDate: best.lastSaleDate,
         recentSales,
+        trend,
+        gradedPriceChangePct,
       });
     }
   }

@@ -53,6 +53,18 @@ export function AppHeader() {
             >
               Buy Signals
             </a>
+            <a
+              href="/sets"
+              className="font-mono text-xs text-slate hover:text-moss transition-colors"
+            >
+              Sets
+            </a>
+            <a
+              href="/alerts"
+              className="font-mono text-xs text-slate hover:text-moss transition-colors"
+            >
+              Alerts
+            </a>
           </nav>
         </div>
 
