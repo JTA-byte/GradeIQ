@@ -3,6 +3,11 @@ import { AppFooter } from "@/components/AppFooter";
 import { BuySignalsTable } from "@/components/BuySignalsTable";
 import { getBuySignals } from "@/lib/buySignals";
 
+// Render on-demand instead of pre-rendering at build time -- with
+// 2,220+ cards, the pre-rendered HTML for this page exceeds Vercel's
+// build output size limit (FALLBACK_BODY_TOO_LARGE at 19.71 MB).
+export const dynamic = "force-dynamic";
+
 // The underlying data (market_sales, gem_rates) only changes when the
 // nightly scrapers run, so there's no need to recompute this on every
 // request -- cache for an hour and let ISR revalidate in the background.
