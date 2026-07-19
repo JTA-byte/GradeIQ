@@ -1,32 +1,41 @@
 const STEPS = [
   {
     number: "01",
-    title: "Upload up to 10 photos",
+    title: "Upload your card",
     description:
-      "Front, back, and close-ups of each corner and edge. The more angles you give it, the sharper the read on corners and centering.",
+      "Just a front photo to get started. Add a back photo and corner close-ups to sharpen the accuracy of your condition estimate.",
   },
   {
     number: "02",
-    title: "AI analyzes every angle",
+    title: "AI estimates condition",
     description:
-      "Centering, surface, edges, and corners — scored across all photos together, not in isolation, and flagged if one zone is meaningfully worse than the rest.",
+      "AI estimates condition from your photos to guide your grading decision — conservatively, by design. Phone cameras can't see what a loupe or blacklight can, so we never pretend to predict an exact grade.",
   },
   {
     number: "03",
-    title: "Get a ranked recommendation",
+    title: "Get the financial verdict",
     description:
-      "PSA, CGC, BGS, and TAG compared side by side, with a full net ROI breakdown after fees — so you know which grader actually pays off.",
+      "PSA, CGC, BGS, and TAG compared side by side with full net ROI after fees, plus a clear yes/no/maybe on whether grading is even worth it for this copy.",
   },
 ];
 
 const FEATURES = [
   {
-    title: "10-photo AI condition assessment",
-    description: "Full front/back plus 8 optional corner close-ups, scored together as one card.",
+    title: "Net ROI after all fees",
+    description: "Grading fees, return shipping, and platform cut — all priced in before you decide.",
+  },
+  {
+    title: "Grade vs. sell raw recommendation",
+    description: "A clear yes/no/maybe verdict when the numbers say grading isn't worth it for this copy.",
   },
   {
     title: "PSA, CGC, BGS, and TAG comparison",
     description: "Every major grader's expected return, ranked side by side for this exact copy.",
+  },
+  {
+    title: "Conservative AI condition estimate",
+    description:
+      "Front photo required; back and corner close-ups improve accuracy. A condition tier and range, not a specific grade prediction.",
   },
   {
     title: "Real gem rate data from live pop reports",
@@ -35,14 +44,6 @@ const FEATURES = [
   {
     title: "Real graded sale prices from Alt.xyz",
     description: "Actual recent sold comps for top-grade copies, not guesswork.",
-  },
-  {
-    title: "Net ROI after all fees",
-    description: "Grading fees, return shipping, and platform cut — all priced in before you decide.",
-  },
-  {
-    title: "Grade vs. sell raw recommendation",
-    description: "A clear verdict when the numbers say grading isn't worth it for this copy.",
   },
   {
     title: "Arbitrage detection across graders",
@@ -81,9 +82,13 @@ export default function LandingPage() {
           <br />
           Sell higher.
         </h1>
-        <p className="font-body text-lg text-slate max-w-2xl mx-auto leading-relaxed mb-10">
+        <p className="font-body text-lg text-slate max-w-2xl mx-auto leading-relaxed mb-4">
           AI-powered grading recommendations that tell you which grader to use, whether to grade
           at all, and your expected net ROI — before you spend a dollar on fees.
+        </p>
+        <p className="font-mono text-sm text-moss max-w-2xl mx-auto leading-relaxed mb-10">
+          GradeIQ is a financial tool first — we tell you if grading is worth it, not just what
+          grade you might get.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
           <a

@@ -47,6 +47,8 @@ async function resizeImage(image: CardImageInput): Promise<CardImageInput> {
   };
 }
 
+export type ConditionTier = "Near Mint" | "Excellent" | "Very Good" | "Good" | "Poor";
+
 export interface VisionAnalysisResult {
   frontCenteringPct: number;
   backCenteringPct: number;
@@ -54,22 +56,36 @@ export interface VisionAnalysisResult {
   edgeScore: number;
   cornerScore: number;
   overallScore: number;
+  conditionTier: ConditionTier;
+  likelyRange: string; // e.g. "PSA 7-8" -- always a range, never a single predicted grade
+  photoLimitations: string[]; // what a phone photo genuinely can't show, e.g. "Surface micro-scratches require raking light"
   notes: string;
   confidence: "low" | "medium" | "high";
   asymmetricWearFlag: boolean;
   worstZone: string;
 }
 
-const SYSTEM_PROMPT = `You are an expert Pokémon TCG card grader with deep knowledge of PSA, CGC, and BGS grading standards. You analyze up to 10 labeled photos of a single card -- a full front shot (always present), an optional full back shot, and up to 8 optional close-ups of each corner/quadrant (e.g. "Front Top-Left", "Back Bottom-Right") -- and provide one objective condition assessment for the card as a whole.
+// This app estimates condition to inform a grading decision -- it does not
+// predict a specific grade. PSA/CGC graders use loupes and blacklights that
+// a phone camera simply cannot replicate, so the prompt is deliberately
+// conservative and reports a range (never a single number) plus an
+// explicit list of what these photos can't rule out.
+const SYSTEM_PROMPT = `You are an expert Pokémon TCG card grader with deep knowledge of PSA, CGC, and BGS grading standards, helping a collector estimate a card's condition from phone photos -- NOT render a definitive grade. You analyze up to 10 labeled photos of a single card -- a full front shot (always present), an optional full back shot, and up to 8 optional close-ups of each corner/quadrant (e.g. "Front Top-Left", "Back Bottom-Right") -- and provide one honest, conservative condition estimate for the card as a whole.
+
+Be conservative. PSA and CGC graders use loupes and blacklights. Phone photos cannot show micro-scratches or fine whitening. When in doubt, assume the lower grade.
 
 Reason across all supplied photos together rather than scoring each in isolation:
 - Use the full front and back photos to judge overall surface condition and to calculate centering.
 - Calculate front centering and back centering independently -- they often differ.
-- If no "Back Full" photo was supplied, you cannot assess the back directly -- report back_centering_pct equal to your front centering estimate as a neutral placeholder, lower your overall confidence rating, and say explicitly in your notes that the back wasn't assessed.
+- If no "Back Full" photo was supplied, you cannot assess the back directly -- report back_centering_pct equal to your front centering estimate as a neutral placeholder, lower your overall confidence rating, and note this in both notes and photo_limitations.
 - Weight the corner close-up photos heavily when scoring corners: a sharp close-up of a corner is much more reliable evidence than what you can see of that same corner in the full-card shot. If a close-up is missing for a corner, rely on the full shots for that corner but note the lower confidence.
 - Look across ALL corners (from both close-ups and full shots) for asymmetric wear -- e.g. one corner noticeably softer/more rounded or whitened than the other three. This kind of localized damage is common and should be called out explicitly, since it can sink an otherwise gem-quality card.
 
-Be conservative and realistic in your scoring. Most cards are NOT gem mint. Surface scratches, whitening on edges, and centering issues are common and should be scored accordingly. A score of 9-10 should be reserved for cards that genuinely look pristine across all supplied photos.
+Be conservative and realistic in your scoring. Most cards are NOT gem mint. Surface scratches, whitening on edges, and centering issues are common and should be scored accordingly. A score of 9-10 should be reserved for cards that genuinely look pristine across all supplied photos -- and even then, list in photo_limitations what these photos still can't rule out.
+
+Report a condition_tier -- one of "Near Mint", "Excellent", "Very Good", "Good", "Poor" -- a plain-English condition bucket, not a numeric grade. Also report a likely_range: your best guess at what a real grader might land on given everything visible (and NOT visible) in these photos, e.g. "PSA 7-8" or "PSA 8-9". This must always be a range spanning at least two adjacent grades, never a single number -- a phone photo cannot resolve the difference between adjacent grades with the certainty a single number would imply.
+
+List photo_limitations: specific things you could NOT assess from these photos that a real grader's tools would catch, e.g. "Surface micro-scratches require raking light", "Edge whitening requires blacklight", "Back photo not supplied -- back condition unassessed". Always include at least one limitation -- phone photos always have some.
 
 You must respond with ONLY valid JSON in this exact format, with no other text:
 {
@@ -79,6 +95,9 @@ You must respond with ONLY valid JSON in this exact format, with no other text:
   "edge_score": <number 1-10>,
   "corner_score": <number 1-10, weighted heavily toward corner close-up photos when present>,
   "overall_score": <number 1-10, your holistic blended assessment>,
+  "condition_tier": "<Near Mint|Excellent|Very Good|Good|Poor>",
+  "likely_range": "<e.g. 'PSA 7-8' -- always a range>",
+  "photo_limitations": ["<string>", "..."],
   "notes": "<2-3 sentence explanation of what you observed and why you scored it this way>",
   "confidence": "<low, medium, or high -- how confident you are given image quality/angle/lighting and how many close-ups were supplied>",
   "asymmetric_wear_flag": <boolean, true if one zone (a specific corner, edge, or region) is meaningfully worse than the rest of the card>,
@@ -153,6 +172,9 @@ export async function analyzeCardCondition(
     edge_score: number;
     corner_score: number;
     overall_score: number;
+    condition_tier: ConditionTier;
+    likely_range: string;
+    photo_limitations: string[];
     notes: string;
     confidence: "low" | "medium" | "high";
     asymmetric_wear_flag: boolean;
@@ -173,6 +195,9 @@ export async function analyzeCardCondition(
     edgeScore: parsed.edge_score,
     cornerScore: parsed.corner_score,
     overallScore: parsed.overall_score,
+    conditionTier: parsed.condition_tier,
+    likelyRange: parsed.likely_range,
+    photoLimitations: parsed.photo_limitations ?? [],
     notes: parsed.notes,
     confidence: parsed.confidence,
     asymmetricWearFlag: parsed.asymmetric_wear_flag,

@@ -129,6 +129,9 @@ interface AnalysisResponse {
     edgeScore: number;
     cornerScore: number;
     overallScore: number;
+    conditionTier: string;
+    likelyRange: string;
+    photoLimitations: string[];
     notes: string;
     confidence: string;
     asymmetricWearFlag: boolean;
@@ -170,6 +173,23 @@ function verdictStyle(verdict: string): { label: string; className: string } {
       return { label: "Do not grade", className: "bg-rust text-paper" };
     default:
       return { label: verdict, className: "bg-slate text-paper" };
+  }
+}
+
+// "Should I grade this?" is a plain yes/no/maybe answer to the same
+// verdict the ROI engine already computes -- purely the financial math,
+// not a restatement of the condition estimate.
+function verdictAnswer(verdict: string): { label: string; className: string } {
+  switch (verdict) {
+    case "grade":
+      return { label: "Yes", className: "text-moss" };
+    case "conditional":
+      return { label: "Maybe", className: "text-ink" };
+    case "sell_raw":
+    case "no_grade":
+      return { label: "No", className: "text-rust" };
+    default:
+      return { label: "?", className: "text-slate" };
   }
 }
 
@@ -668,51 +688,61 @@ export default function ScanPage() {
         {/* Results */}
         {result && (
           <div className="space-y-8 border-t border-line pt-10">
-            {/* Vision assessment */}
+            {/* Disclaimer */}
+            <div className="border border-gold bg-gold/10 px-4 py-3 font-mono text-xs text-ink leading-relaxed">
+              GradeIQ estimates condition from photos to guide your grading decision. Phone
+              cameras cannot detect micro-scratches or edge whitening visible under a loupe or
+              blacklight. For precise grading, submit to PSA, CGC, BGS, or TAG.
+            </div>
+
+            {/* Should I grade this? -- the financial answer, front and center */}
             <section>
-              <h2 className="font-display text-lg mb-3">Vision assessment</h2>
-              <div className="border border-line bg-white/40 p-5">
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-4 font-mono text-xs">
-                  {[
-                    {
-                      label: "Front centering",
-                      value: `${result.vision.frontCenteringPct}/${100 - result.vision.frontCenteringPct}`,
-                    },
-                    {
-                      label: "Back centering",
-                      value: `${result.vision.backCenteringPct}/${100 - result.vision.backCenteringPct}`,
-                    },
-                    { label: "Surface", value: `${result.vision.surfaceScore}/10` },
-                    { label: "Edges", value: `${result.vision.edgeScore}/10` },
-                    { label: "Corners", value: `${result.vision.cornerScore}/10` },
-                  ].map(({ label, value }) => (
-                    <div key={label}>
-                      <div className="text-slate/70 mb-1">{label}</div>
-                      <div className="text-xl text-ink font-display">{value}</div>
-                    </div>
-                  ))}
+              <h2 className="font-display text-2xl mb-3">Should I grade this?</h2>
+              <div className={`${verdict?.className} p-6`}>
+                <div className="flex items-baseline gap-4 mb-2">
+                  <span className="font-display text-5xl">{verdictAnswer(result.recommendation.verdict).label}</span>
+                  <span className="font-display text-xl">{verdict?.label}</span>
                 </div>
-                {result.vision.asymmetricWearFlag && (
-                  <div className="mb-4 border border-gold bg-gold/10 px-4 py-3 font-mono text-xs text-ink">
-                    <span className="font-medium">Asymmetric wear flag: </span>
-                    Worst zone is {result.vision.worstZone} — condition is uneven across the card.
-                  </div>
-                )}
-                <p className="font-body text-sm text-slate leading-relaxed border-t border-line pt-3">
-                  {result.vision.notes}
+                <p className="font-body text-base leading-relaxed opacity-90">
+                  {result.recommendation.verdictReason}
                 </p>
-                <p className="font-mono text-xs text-slate/50 mt-2">
-                  AI confidence: {result.vision.confidence}
-                </p>
+              </div>
+              {result.recommendation.arbitrageFlag && (
+                <div className="mt-3 border border-gold bg-gold/10 px-4 py-3 font-mono text-xs text-ink">
+                  <span className="font-medium">Arbitrage signal: </span>
+                  {result.recommendation.arbitrageFlag}
+                </div>
+              )}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-line bg-white/40 px-4 py-3">
+                <div className="font-mono text-sm text-slate">
+                  {result.maxBuyPrice !== null ? (
+                    <>
+                      Max buy price for 50% ROI:{" "}
+                      <span className="font-display text-2xl text-ink">
+                        ${result.maxBuyPrice.toLocaleString()}
+                      </span>
+                    </>
+                  ) : (
+                    "No grader clears the confidence threshold, so there's no target buy price for this copy."
+                  )}
+                </div>
+                <a
+                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, variant, variantDetail, language })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
+                >
+                  Find on eBay
+                </a>
               </div>
             </section>
 
             {/* Raw price */}
             <section>
-              <h2 className="font-display text-lg mb-3">Raw price</h2>
-              <div className="border border-line bg-white/40 p-5 flex items-center justify-between flex-wrap gap-3">
+              <h2 className="font-display text-xl mb-3">Raw price</h2>
+              <div className="border border-line bg-white/40 p-6 flex items-center justify-between flex-wrap gap-3">
                 <div>
-                  <div className="font-display text-3xl text-ink">
+                  <div className="font-display text-4xl text-ink">
                     ${Math.round(result.market.rawMarketPrice).toLocaleString()}
                   </div>
                   <p
@@ -734,48 +764,9 @@ export default function ScanPage() {
               </div>
             </section>
 
-            {/* Verdict */}
-            <section>
-              <h2 className="font-display text-lg mb-3">Verdict</h2>
-              <div className={`${verdict?.className} p-5`}>
-                <div className="font-display text-2xl mb-2">{verdict?.label}</div>
-                <p className="font-body text-sm leading-relaxed opacity-90">
-                  {result.recommendation.verdictReason}
-                </p>
-              </div>
-              {result.recommendation.arbitrageFlag && (
-                <div className="mt-3 border border-gold bg-gold/10 px-4 py-3 font-mono text-xs text-ink">
-                  <span className="font-medium">Arbitrage signal: </span>
-                  {result.recommendation.arbitrageFlag}
-                </div>
-              )}
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-line bg-white/40 px-4 py-3">
-                <div className="font-mono text-xs text-slate">
-                  {result.maxBuyPrice !== null ? (
-                    <>
-                      Max buy price for 50% ROI:{" "}
-                      <span className="font-display text-lg text-ink">
-                        ${result.maxBuyPrice.toLocaleString()}
-                      </span>
-                    </>
-                  ) : (
-                    "No grader clears the confidence threshold, so there's no target buy price for this copy."
-                  )}
-                </div>
-                <a
-                  href={ebayRawSoldListingsUrl({ cardName, cardNumber, setName, variant, variantDetail, language })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
-                >
-                  Find on eBay
-                </a>
-              </div>
-            </section>
-
             {/* Grader comparison — 4 columns for PSA/CGC/BGS/TAG */}
             <section>
-              <h2 className="font-display text-lg mb-3">Grader comparison</h2>
+              <h2 className="font-display text-xl mb-3">Grader comparison</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {result.recommendation.recommendations.map((rec, i) => (
                   <GraderSlab key={rec.grader} rec={rec} rank={i} />
@@ -801,11 +792,70 @@ export default function ScanPage() {
                   </span>
                 )}
               </div>
-              <p className="mt-4 font-mono text-[11px] text-slate/50 leading-relaxed">
-                GradeIQ provides data for informational purposes only. Grading outcomes are not
-                guaranteed. This is not financial advice.
-              </p>
             </section>
+
+            {/* Condition estimate -- de-emphasized: this app leads with the
+                financial answer, not the condition guess. */}
+            <section>
+              <h2 className="font-display text-base text-slate mb-3">Condition estimate</h2>
+              <div className="border border-line bg-white/40 p-4">
+                <div className="flex flex-wrap items-baseline gap-3 mb-3">
+                  <span className="font-display text-xl text-ink">{result.vision.conditionTier}</span>
+                  <span className="font-mono text-xs text-slate">
+                    Estimated condition range: {result.vision.likelyRange}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-4 font-mono text-xs">
+                  {[
+                    {
+                      label: "Front centering",
+                      value: `${result.vision.frontCenteringPct}/${100 - result.vision.frontCenteringPct}`,
+                    },
+                    {
+                      label: "Back centering",
+                      value: `${result.vision.backCenteringPct}/${100 - result.vision.backCenteringPct}`,
+                    },
+                    { label: "Surface", value: `${result.vision.surfaceScore}/10` },
+                    { label: "Edges", value: `${result.vision.edgeScore}/10` },
+                    { label: "Corners", value: `${result.vision.cornerScore}/10` },
+                  ].map(({ label, value }) => (
+                    <div key={label}>
+                      <div className="text-slate/70 mb-1">{label}</div>
+                      <div className="text-base text-ink font-display">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                {result.vision.asymmetricWearFlag && (
+                  <div className="mb-3 border border-gold bg-gold/10 px-4 py-3 font-mono text-xs text-ink">
+                    <span className="font-medium">Asymmetric wear flag: </span>
+                    Worst zone is {result.vision.worstZone} — condition is uneven across the card.
+                  </div>
+                )}
+                <p className="font-body text-sm text-slate leading-relaxed border-t border-line pt-3">
+                  {result.vision.notes}
+                </p>
+                {result.vision.photoLimitations.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-line">
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
+                      What these photos can't show
+                    </p>
+                    <ul className="font-mono text-xs text-slate/70 list-disc list-inside space-y-0.5">
+                      {result.vision.photoLimitations.map((limitation, i) => (
+                        <li key={i}>{limitation}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <p className="font-mono text-xs text-slate/50 mt-2">
+                  AI confidence: {result.vision.confidence}
+                </p>
+              </div>
+            </section>
+
+            <p className="font-mono text-[11px] text-slate/50 leading-relaxed">
+              GradeIQ provides data for informational purposes only. Grading outcomes are not
+              guaranteed. This is not financial advice.
+            </p>
           </div>
         )}
       </div>
