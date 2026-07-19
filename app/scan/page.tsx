@@ -19,29 +19,42 @@ interface CardSuggestion {
   variant_detail: string | null;
 }
 
-interface SlotDef {
-  key: string;
-  label: string;
-  required: boolean;
+interface CardIdentification {
+  name: string;
+  setName: string;
+  cardNumber: string;
+  language: string;
+  variant: string;
+  variantDetail: string | null;
+  confidence: "low" | "medium" | "high";
 }
 
-const SLOTS: SlotDef[] = [
-  { key: "front_full", label: "Front Full", required: true },
-  { key: "front_top_left", label: "Front Top-Left", required: false },
-  { key: "front_top_right", label: "Front Top-Right", required: false },
-  { key: "front_bottom_left", label: "Front Bottom-Left", required: false },
-  { key: "front_bottom_right", label: "Front Bottom-Right", required: false },
-  { key: "back_full", label: "Back Full", required: true },
-  { key: "back_top_left", label: "Back Top-Left", required: false },
-  { key: "back_top_right", label: "Back Top-Right", required: false },
-  { key: "back_bottom_left", label: "Back Bottom-Left", required: false },
-  { key: "back_bottom_right", label: "Back Bottom-Right", required: false },
+interface CloseupSlotDef {
+  key: string;
+  label: string;
+}
+
+const CLOSEUP_SLOTS: CloseupSlotDef[] = [
+  { key: "front_top_left", label: "Front Top-Left" },
+  { key: "front_top_right", label: "Front Top-Right" },
+  { key: "front_bottom_left", label: "Front Bottom-Left" },
+  { key: "front_bottom_right", label: "Front Bottom-Right" },
+  { key: "back_top_left", label: "Back Top-Left" },
+  { key: "back_top_right", label: "Back Top-Right" },
+  { key: "back_bottom_left", label: "Back Bottom-Left" },
+  { key: "back_bottom_right", label: "Back Bottom-Right" },
 ];
 
 interface SlotImage {
   preview: string;
   base64: string;
   mediaType: string;
+}
+
+type SlotKind = "front" | "back" | "closeup";
+interface ActiveSlot {
+  kind: SlotKind;
+  key?: string;
 }
 
 // Vercel serverless functions cap request bodies at 4.5MB. Base64 inflates
@@ -99,6 +112,13 @@ function resizeImageFile(file: File): Promise<{ dataUrl: string; mediaType: stri
 
     img.src = objectUrl;
   });
+}
+
+function photoConfidenceLabel(count: number): string {
+  if (count >= 10) return "Maximum";
+  if (count >= 4) return "High";
+  if (count >= 2) return "Good";
+  return "Basic";
 }
 
 interface AnalysisResponse {
@@ -162,8 +182,17 @@ export default function ScanPage() {
   const [language, setLanguage] = useState<CardLanguage>("English");
   const [suggestions, setSuggestions] = useState<CardSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [slotImages, setSlotImages] = useState<Record<string, SlotImage | undefined>>({});
-  const [activeSlot, setActiveSlot] = useState<string | null>(null);
+
+  const [frontImage, setFrontImage] = useState<SlotImage | undefined>(undefined);
+  const [backImage, setBackImage] = useState<SlotImage | undefined>(undefined);
+  const [closeupImages, setCloseupImages] = useState<Record<string, SlotImage | undefined>>({});
+  const [showCloseups, setShowCloseups] = useState(false);
+  const [activeSlot, setActiveSlot] = useState<ActiveSlot | null>(null);
+
+  const [identifying, setIdentifying] = useState(false);
+  const [identification, setIdentification] = useState<CardIdentification | null>(null);
+  const [identificationError, setIdentificationError] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ message: string; isLimit?: boolean } | null>(null);
   const [result, setResult] = useState<AnalysisResponse | null>(null);
@@ -173,6 +202,11 @@ export default function ScanPage() {
   const hasRequiredCardFields = Boolean(
     cardName.trim() && setName.trim() && cardNumber.trim() && (!needsVariantDetail || variantDetail.trim())
   );
+
+  const closeupCount = Object.values(closeupImages).filter(Boolean).length;
+  const totalPhotoCount = (frontImage ? 1 : 0) + (backImage ? 1 : 0) + closeupCount;
+  const hasRequiredPhotos = Boolean(frontImage);
+  const fieldHighlight = identification?.confidence === "low" ? "border-gold" : "border-line";
 
   // Debounced autocomplete: look up matching cards as the user types a
   // name/set, so they can pick the exact printing (and auto-fill its
@@ -219,28 +253,72 @@ export default function ScanPage() {
     setShowSuggestions(false);
   }
 
-  const uploadedCount = SLOTS.filter((slot) => slotImages[slot.key]).length;
-  const hasRequiredPhotos = SLOTS.filter((slot) => slot.required).every(
-    (slot) => slotImages[slot.key]
-  );
-
-  function openSlot(key: string) {
-    setActiveSlot(key);
+  function openSlot(kind: SlotKind, key?: string) {
+    setActiveSlot({ kind, key });
     fileInputRef.current?.click();
+  }
+
+  async function runIdentification(image: SlotImage) {
+    setIdentifying(true);
+    setIdentificationError(null);
+    try {
+      const res = await fetch("/api/identify-card", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: { base64: image.base64, mediaType: image.mediaType } }),
+      });
+
+      if (res.status === 401) {
+        window.location.href = "/auth/login";
+        return;
+      }
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Could not identify this card automatically");
+      }
+
+      const data: { identification: CardIdentification } = await res.json();
+      const id = data.identification;
+
+      setCardName(id.name);
+      setSetName(id.setName);
+      setCardNumber(id.cardNumber);
+      if ((CARD_LANGUAGES as string[]).includes(id.language)) {
+        setLanguage(id.language as CardLanguage);
+      }
+      if ((CARD_VARIANTS as string[]).includes(id.variant)) {
+        setVariant(id.variant as CardVariant);
+      }
+      setVariantDetail(id.variantDetail ?? "");
+      setIdentification(id);
+    } catch (err) {
+      setIdentificationError(
+        err instanceof Error ? err.message : "Could not identify this card automatically -- fill in the fields below."
+      );
+    } finally {
+      setIdentifying(false);
+    }
   }
 
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    const slotKey = activeSlot;
+    const slot = activeSlot;
     e.target.value = "";
-    if (!file || !slotKey) return;
+    if (!file || !slot) return;
 
     try {
       const { dataUrl, mediaType } = await resizeImageFile(file);
-      setSlotImages((prev) => ({
-        ...prev,
-        [slotKey]: { preview: dataUrl, base64: dataUrl.split(",")[1], mediaType },
-      }));
+      const image: SlotImage = { preview: dataUrl, base64: dataUrl.split(",")[1], mediaType };
+
+      if (slot.kind === "front") {
+        setFrontImage(image);
+        runIdentification(image);
+      } else if (slot.kind === "back") {
+        setBackImage(image);
+      } else if (slot.kind === "closeup" && slot.key) {
+        setCloseupImages((prev) => ({ ...prev, [slot.key!]: image }));
+      }
     } catch (err) {
       setError({ message: err instanceof Error ? err.message : "Could not process that photo" });
     }
@@ -249,8 +327,7 @@ export default function ScanPage() {
   async function handleAnalyze() {
     if (!hasRequiredPhotos || !hasRequiredCardFields) {
       setError({
-        message:
-          "Please upload at least the Front Full and Back Full photos, and fill in card name, set name, and card number.",
+        message: "Please upload at least the front photo, and fill in card name, set name, and card number.",
       });
       return;
     }
@@ -258,11 +335,13 @@ export default function ScanPage() {
     setError(null);
     setResult(null);
 
-    const images = SLOTS.filter((slot) => slotImages[slot.key]).map((slot) => ({
-      label: slot.label,
-      base64: slotImages[slot.key]!.base64,
-      mediaType: slotImages[slot.key]!.mediaType,
-    }));
+    const images: { label: string; base64: string; mediaType: string }[] = [];
+    if (frontImage) images.push({ label: "Front Full", base64: frontImage.base64, mediaType: frontImage.mediaType });
+    if (backImage) images.push({ label: "Back Full", base64: backImage.base64, mediaType: backImage.mediaType });
+    for (const slot of CLOSEUP_SLOTS) {
+      const img = closeupImages[slot.key];
+      if (img) images.push({ label: slot.label, base64: img.base64, mediaType: img.mediaType });
+    }
 
     const requestBody = JSON.stringify({
       images,
@@ -336,49 +415,93 @@ export default function ScanPage() {
             <div className="flex items-baseline justify-between mb-3">
               <h2 className="font-display text-lg">1. Upload your card</h2>
               <span className="font-mono text-xs text-slate/70">
-                {uploadedCount}/{SLOTS.length} photos added
+                Analysis confidence: {photoConfidenceLabel(totalPhotoCount)} ({totalPhotoCount}{" "}
+                photo{totalPhotoCount === 1 ? "" : "s"})
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-2">
-              {SLOTS.map((slot) => {
-                const image = slotImages[slot.key];
-                return (
-                  <div key={slot.key} className="flex flex-col items-center">
-                    <button
-                      type="button"
-                      onClick={() => openSlot(slot.key)}
-                      className={`w-full aspect-[3/4] border-2 flex items-center justify-center overflow-hidden bg-white/40 transition-colors ${
-                        image
-                          ? "border-moss"
-                          : slot.required
-                          ? "border-dashed border-rust/60 hover:border-rust"
-                          : "border-dashed border-line hover:border-moss"
-                      }`}
-                    >
-                      {image ? (
-                        <img
-                          src={image.preview}
-                          alt={slot.label}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <span className="font-mono text-[10px] text-slate/60 px-1 text-center leading-tight">
-                          +
-                        </span>
-                      )}
-                    </button>
-                    <span className="font-mono text-[10px] text-slate/70 mt-1 text-center leading-tight">
-                      {slot.label}
-                      {slot.required && <span className="text-rust">*</span>}
-                    </span>
-                  </div>
-                );
-              })}
+
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div className="flex flex-col items-center">
+                <button
+                  type="button"
+                  onClick={() => openSlot("front")}
+                  className={`w-full aspect-[3/4] border-2 flex items-center justify-center overflow-hidden bg-white/40 transition-colors ${
+                    frontImage ? "border-moss" : "border-dashed border-rust/60 hover:border-rust"
+                  }`}
+                >
+                  {frontImage ? (
+                    <img src={frontImage.preview} alt="Front Full" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="font-mono text-2xl text-slate/60">+</span>
+                  )}
+                </button>
+                <span className="font-mono text-[11px] text-slate/70 mt-1 text-center leading-tight">
+                  Front photo <span className="text-rust">*</span> required
+                </span>
+              </div>
+
+              <div className="flex flex-col items-center">
+                <button
+                  type="button"
+                  onClick={() => openSlot("back")}
+                  className={`w-full aspect-[3/4] border-2 flex items-center justify-center overflow-hidden bg-white/40 transition-colors ${
+                    backImage ? "border-moss" : "border-dashed border-line hover:border-moss"
+                  }`}
+                >
+                  {backImage ? (
+                    <img src={backImage.preview} alt="Back Full" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="font-mono text-2xl text-slate/60">+</span>
+                  )}
+                </button>
+                <span className="font-mono text-[11px] text-slate/70 mt-1 text-center leading-tight">
+                  Back photo — recommended for accurate centering
+                </span>
+              </div>
             </div>
-            <p className="font-mono text-[11px] text-slate/60 mt-3">
-              <span className="text-rust">*</span> Front Full and Back Full are required. The 8
-              corner close-ups are optional but recommended — they sharpen corner scoring.
-            </p>
+
+            <button
+              type="button"
+              onClick={() => setShowCloseups((v) => !v)}
+              className="w-full text-left font-mono text-xs uppercase tracking-widest border border-line px-3 py-2 hover:border-moss hover:text-moss transition-colors flex items-center justify-between"
+            >
+              <span>
+                Add close-up photos (improves corner and edge accuracy){" "}
+                {closeupCount > 0 && `— ${closeupCount}/8 added`}
+              </span>
+              <span>{showCloseups ? "−" : "+"}</span>
+            </button>
+
+            {showCloseups && (
+              <div className="grid grid-cols-4 gap-2 mt-3">
+                {CLOSEUP_SLOTS.map((slot) => {
+                  const image = closeupImages[slot.key];
+                  return (
+                    <div key={slot.key} className="flex flex-col items-center">
+                      <button
+                        type="button"
+                        onClick={() => openSlot("closeup", slot.key)}
+                        className={`w-full aspect-[3/4] border-2 flex items-center justify-center overflow-hidden bg-white/40 transition-colors ${
+                          image ? "border-moss" : "border-dashed border-line hover:border-moss"
+                        }`}
+                      >
+                        {image ? (
+                          <img src={image.preview} alt={slot.label} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="font-mono text-[10px] text-slate/60 px-1 text-center leading-tight">
+                            +
+                          </span>
+                        )}
+                      </button>
+                      <span className="font-mono text-[9px] text-slate/70 mt-1 text-center leading-tight">
+                        {slot.label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             <input
               ref={fileInputRef}
               type="file"
@@ -392,6 +515,29 @@ export default function ScanPage() {
             <div>
               <h2 className="font-display text-lg mb-3">2. Identify your card</h2>
 
+              {identifying && (
+                <div className="mb-2 px-3 py-2 font-mono text-[11px] border border-line bg-white/40 text-slate">
+                  Identifying card from your photo...
+                </div>
+              )}
+              {!identifying && identification && (
+                <div
+                  className={`mb-2 px-3 py-2 font-mono text-[11px] border ${
+                    identification.confidence === "low"
+                      ? "border-gold bg-gold/10 text-ink"
+                      : "border-moss bg-moss/10 text-moss"
+                  }`}
+                >
+                  AI identified this card — {identification.confidence} confidence
+                  {identification.confidence === "low" && " · please verify the fields below"}
+                </div>
+              )}
+              {!identifying && identificationError && (
+                <div className="mb-2 px-3 py-2 font-mono text-[11px] border border-rust bg-rust/10 text-rust">
+                  {identificationError}
+                </div>
+              )}
+
               <div className="relative mb-2">
                 <input
                   type="text"
@@ -400,7 +546,7 @@ export default function ScanPage() {
                   onFocus={() => setShowSuggestions(true)}
                   onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
                   placeholder="Card name -- e.g. Charizard"
-                  className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss"
+                  className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss ${fieldHighlight}`}
                 />
                 {showSuggestions && suggestions.length > 0 && (
                   <ul className="absolute z-10 top-full left-0 right-0 mt-1 border border-line bg-paper shadow-md max-h-56 overflow-y-auto">
@@ -430,7 +576,7 @@ export default function ScanPage() {
                 onFocus={() => setShowSuggestions(true)}
                 onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
                 placeholder="Set name -- e.g. Base Set"
-                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+                className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2 ${fieldHighlight}`}
               />
 
               <input
@@ -438,7 +584,7 @@ export default function ScanPage() {
                 value={cardNumber}
                 onChange={(e) => setCardNumber(e.target.value)}
                 placeholder="Card number -- e.g. 4/102"
-                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-1"
+                className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-1 ${fieldHighlight}`}
                 onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
               />
               <p className="font-mono text-[11px] text-slate/60 mb-2">
@@ -454,7 +600,7 @@ export default function ScanPage() {
                   setVariant(e.target.value as CardVariant);
                   setVariantDetail("");
                 }}
-                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+                className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2 ${fieldHighlight}`}
               >
                 {CARD_VARIANTS.map((v) => (
                   <option key={v} value={v}>
@@ -469,7 +615,7 @@ export default function ScanPage() {
                   value={variantDetail}
                   onChange={(e) => setVariantDetail(e.target.value)}
                   placeholder={variantDetailLabel(variant)}
-                  className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2"
+                  className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss mb-2 ${fieldHighlight}`}
                 />
               )}
 
@@ -479,7 +625,7 @@ export default function ScanPage() {
               <select
                 value={language}
                 onChange={(e) => setLanguage(e.target.value as CardLanguage)}
-                className="w-full border border-line bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss"
+                className={`w-full border bg-white/60 px-4 py-3 font-mono text-sm focus:outline-none focus:border-moss ${fieldHighlight}`}
               >
                 {CARD_LANGUAGES.map((lang) => (
                   <option key={lang} value={lang}>

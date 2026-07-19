@@ -7,9 +7,14 @@
  * 1. Verify the user is logged in
  * 2. Check scan allowance (free: 3/month, pro: unlimited)
  * 3. Upload up to 10 labeled card images to Supabase Storage
- * 4. Run Claude vision analysis across all images in one call
- * 5. Resolve the card's identity (name + set + card number + language)
- *    to a real cards row, then pull market data + gem rates against it
+ * 4. Run Claude's condition assessment across all supplied images in one
+ *    call (Front Full is the only strictly required photo -- Back Full
+ *    and the 8 close-ups improve accuracy but aren't required)
+ * 5. Resolve the card's identity (name + set + card number + language +
+ *    variant) to a real cards row, then pull market data + gem rates
+ *    against it -- using the identity the frontend already auto-filled
+ *    via POST /api/identify-card at upload time (or the user's manual
+ *    edits to it). This route never re-identifies the card itself.
  * 6. Run ROI engine
  * 7. Save scan record to DB
  * 8. Increment scan counter
@@ -23,7 +28,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { analyzeCardImages, CardImageInput } from "@/lib/visionAnalysis";
+import { analyzeCardCondition, CardImageInput } from "@/lib/visionAnalysis";
 import { getCardMarketData, getCardGemRates } from "@/lib/mockDataService";
 import { CARD_LANGUAGES, CardLanguage, resolveOrCreateCard } from "@/lib/cardIdentifier";
 import { CARD_VARIANTS, CardVariant, variantNeedsDetail } from "@/lib/cardVariant";
@@ -37,7 +42,7 @@ import {
 } from "@/lib/roiEngine";
 import { checkScanAllowance, recordScanUsed } from "@/lib/scanGating";
 
-const REQUIRED_LABELS = ["Front Full", "Back Full"];
+const REQUIRED_LABELS = ["Front Full"];
 
 interface CardIdentifierInput {
   name?: string;
@@ -200,7 +205,7 @@ export async function POST(request: NextRequest) {
     // ── 5. Vision analysis ───────────────────────────────────────────────────
     let visionResult;
     try {
-      visionResult = await analyzeCardImages(images);
+      visionResult = await analyzeCardCondition(images);
     } catch (err) {
       return NextResponse.json(
         { error: `Anthropic vision analysis failed: ${errorMessage(err)}` },
