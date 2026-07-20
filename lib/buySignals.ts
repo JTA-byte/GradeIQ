@@ -84,6 +84,24 @@ const LOW_VOLUME_THRESHOLD = 5;
 const HIGH_CONFIDENCE_THRESHOLD = 10;
 const RECENT_SALE_WINDOW_DAYS = 90;
 
+// A card needs at least this many real top-grade sales anchoring its
+// price estimate to appear in Buy Signals at all -- 1-2 sales is too
+// thin a sample to trust for a "buy this" recommendation, even before
+// considering whether either of those sales is itself bad data.
+const MIN_SALES_FOR_SIGNAL = 3;
+
+// If the graded (top-grade) average is more than this many multiples of
+// the real raw price, something upstream is almost certainly wrong --
+// either scraper contamination (a different, more valuable printing) or
+// a single mislabeled/outlier listing (confirmed live: a real "Flygon
+// #5 Rising Rivals" PSA 10 sale at $3,700 sitting next to PSA 7-9 sales
+// at $19-47 -- same card, correctly identified, still an implausible
+// price). Rather than guess which it is, exclude the card until someone
+// reviews market_sales for it directly -- this same ratio is also the
+// basis of the one-off market_sales cleanup query run against the live
+// DB to clear out rows written before this check existed.
+const MAX_GRADED_TO_RAW_RATIO = 100;
+
 export type PriceConfidence = "high" | "medium" | "low";
 export type PriceTrend = "trending_up" | "cooling" | "stable";
 
@@ -126,6 +144,7 @@ export interface BuySignal {
   recentSales: RecentSaleDisplay[];
   trend: PriceTrend;
   gradedPriceChangePct: number | null; // last 30d vs 31-60d avg graded sale price, null if not enough history either side
+  dataQualityScore: number; // 0-100, see computeDataQualityScore() -- higher is more trustworthy
 }
 
 interface MarketSaleRow {
@@ -431,6 +450,52 @@ function computeTrend(
 }
 
 /**
+ * 0-100 score for how much a signal's numbers should be trusted, built
+ * from four independent factors (each capped before summing, so one
+ * strong factor can't compensate for a card that's weak everywhere
+ * else):
+ *  - Volume (0-40): how many top-grade sales anchor topGradePrice.
+ *  - Recency (0-20): how many of those are from the last 90 days.
+ *  - Consistency (0-20): how tightly the top-grade sale prices cluster
+ *    -- via coefficient of variation. This is what catches a single
+ *    wild outlier mixed into otherwise-sane sales (a real "Flygon #5
+ *    Rising Rivals" PSA 10 sold for $3,700 next to PSA 7-9 sales at
+ *    $19-47 during live testing -- every sale passed the alt_scraper.py
+ *    identity check individually, but the spread itself is the tell).
+ *  - Raw grounding (0-20): whether rawMarketPrice came from a real
+ *    scraped raw sale rather than ESTIMATED_RAW_TO_TOP_GRADE_RATIO's guess.
+ *
+ * This is a trust signal for the UI, separate from the hard
+ * MIN_SALES_FOR_SIGNAL / MAX_GRADED_TO_RAW_RATIO cutoffs below that
+ * exclude a card from Buy Signals entirely -- a card can clear both
+ * cutoffs and still show a middling score here (e.g. exactly 3 sales,
+ * all old, no real raw price).
+ */
+function computeDataQualityScore(params: {
+  saleCount: number;
+  recentSaleCount90d: number;
+  isRawPriceEstimated: boolean;
+  topSalePrices: number[];
+}): number {
+  const { saleCount, recentSaleCount90d, isRawPriceEstimated, topSalePrices } = params;
+
+  const volumeScore = Math.min(saleCount / HIGH_CONFIDENCE_THRESHOLD, 1) * 40;
+  const recencyScore = Math.min(recentSaleCount90d / LOW_VOLUME_THRESHOLD, 1) * 20;
+
+  let consistencyScore = 20; // neutral default -- nothing to compare a single sale against
+  if (topSalePrices.length > 1) {
+    const mean = average(topSalePrices);
+    const variance = average(topSalePrices.map((p) => (p - mean) ** 2));
+    const coefficientOfVariation = mean > 0 ? Math.sqrt(variance) / mean : 0;
+    consistencyScore = Math.max(0, 1 - coefficientOfVariation) * 20;
+  }
+
+  const rawGroundingScore = isRawPriceEstimated ? 0 : 20;
+
+  return Math.round(volumeScore + recencyScore + consistencyScore + rawGroundingScore);
+}
+
+/**
  * Computes buy signals for every card with real market_sales data.
  * Cached for an hour (see app/buy-signals/page.tsx's revalidate export) --
  * this does real aggregation work across every scraped sale, and the
@@ -588,10 +653,33 @@ export async function getBuySignals(): Promise<BuySignal[]> {
     }
 
     if (best) {
+      if (best.saleCount < MIN_SALES_FOR_SIGNAL) {
+        continue; // too few sales to trust this card's price estimate at all
+      }
+
+      if (!best.isRawPriceEstimated && best.rawMarketPrice > 0) {
+        const gradedToRawRatio = best.topGradePrice / best.rawMarketPrice;
+        if (gradedToRawRatio > MAX_GRADED_TO_RAW_RATIO) {
+          console.warn(
+            `[buySignals] Excluding '${card.name}' (${card.set_name}) as unverified data: ` +
+              `${best.targetGradeLabel} avg $${Math.round(best.topGradePrice)} is ` +
+              `${gradedToRawRatio.toFixed(0)}x the real raw price $${Math.round(best.rawMarketPrice)}. ` +
+              `Review market_sales for card_id=${cardId} before re-including.`
+          );
+          continue;
+        }
+      }
+
       const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
       const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
       const gapDollars = best.topGradePrice - best.rawMarketPrice;
       const { trend, gradedPriceChangePct } = computeTrend(best.topSalesRows, rawSales);
+      const dataQualityScore = computeDataQualityScore({
+        saleCount: best.saleCount,
+        recentSaleCount90d: best.recentSaleCount90d,
+        isRawPriceEstimated: best.isRawPriceEstimated,
+        topSalePrices: best.topSalesRows.map((s) => s.sale_price),
+      });
 
       const recentSales: RecentSaleDisplay[] = [...gradedSales]
         .sort((a, b) => new Date(b.sale_date).getTime() - new Date(a.sale_date).getTime())
@@ -644,6 +732,7 @@ export async function getBuySignals(): Promise<BuySignal[]> {
         recentSales,
         trend,
         gradedPriceChangePct,
+        dataQualityScore,
       });
     }
   }

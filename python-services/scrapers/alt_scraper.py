@@ -43,6 +43,9 @@ an earlier, unverified draft of this file:
      react-virtuoso list, so only ~15 results are ever in the DOM at
      once; scrolling to load more isn't implemented here)
    - `[data-testid^="subject-card-number-"]` -- e.g. "Umbreon Vmax #215"
+   - `[data-testid^="year-brand-variety-"]` -- e.g. "2009 Pokemon Platinum
+     Rising Rivals" -- the row's year/set/product-line text. Used by
+     _row_matches_card() below to reject cross-set contamination.
    - `[data-testid^="grade-"]` -- e.g. "PSA 9" (grader + grade combined)
    - `[data-testid^="sold-price-"]` -- e.g. "$2,658"
    - `img[src*="auction-house-logos"]` -- the marketplace logo; its `alt`
@@ -52,6 +55,19 @@ an earlier, unverified draft of this file:
    - Sale date has no dedicated testid -- it renders as "Sold • <date>"
      in plain text near the price, so it's pulled via regex over the
      card's full text instead.
+
+7. Alt's search is fuzzy, not a strict filter -- even a query that already
+   includes the card number and set (e.g. "Flygon 5 Rising Rivals")
+   returns rows for entirely different printings. Confirmed live: that
+   exact query surfaced a row reading "Flygon Lv X #105" (a different
+   card, different number, different subset) mixed in with the correct
+   "Flygon #5" rows. Recording that row's $160 PSA 5 sale against the
+   real Flygon #5 (worth closer to $20-45 raw/low-grade) is exactly the
+   kind of contamination that produced wildly wrong PSA 10 averages
+   downstream in Buy Signals. _row_matches_card() rejects any row whose
+   `subject-card-number-` text doesn't carry the exact requested card
+   number, and whose `year-brand-variety-` text doesn't contain a
+   recognizable word from the requested set name -- both must pass.
 
 5. Population ("POP 4,403") is NOT present on the search grid at all --
    only on individual /itm/{uuid} detail pages (`data-testid="card-pops"`
@@ -87,6 +103,77 @@ from scrapers.base_scraper import (
 GRADE_PATTERN = re.compile(r"\b(PSA|BGS|CGC|SGC)\s*[- ]?(10|9\.5|9|8|PRI|BL)\b", re.IGNORECASE)
 DATE_PATTERN = re.compile(r"Sold\D*?([A-Za-z]{3}\s+\d{1,2},\s+\d{4})")
 PRICE_PATTERN = re.compile(r"[\d,]+\.?\d*")
+
+# Matches the trailing "#<number>" in a subject-card-number string like
+# "Flygon #5" or "Flygon Lv X #105". \S+ (not \d+) because some numbers
+# carry letters (promo codes like "SWSH001").
+ROW_NUMBER_PATTERN = re.compile(r"#\s*(\S+)\s*$")
+
+# Words too generic to prove a set match on their own -- "Pokemon",
+# "English", "Holo" etc. show up on nearly every row regardless of set,
+# so requiring one of these to match would make the set check meaningless.
+_SET_WORD_STOPWORDS = {
+    "pokemon", "pokémon", "english", "japanese", "korean", "chinese",
+    "holo", "set", "edition", "series", "the", "and", "of",
+}
+
+
+def _normalize_number(raw: str) -> str:
+    """"5", "05", and "5/111" should all compare equal -- Alt renders a
+    bare number while a card's stored card_number occasionally carries a
+    "/total" suffix. Leading zeros are stripped the same way on both
+    sides so "05" (a printed leading zero, e.g. some Japanese sets)
+    matches "5"."""
+    return raw.strip().split("/")[0].lstrip("0") or "0"
+
+
+def _set_name_words(set_name: str) -> list[str]:
+    words = re.findall(r"[A-Za-z0-9]+", set_name.lower())
+    significant = [w for w in words if len(w) >= 4 and w not in _SET_WORD_STOPWORDS]
+    # A short set name ("Base Set", "Fossil") might have no word >= 4
+    # chars left after filtering -- fall back to whatever's there rather
+    # than requiring an impossible match.
+    return significant or [w for w in words if w not in _SET_WORD_STOPWORDS] or words
+
+
+def _row_matches_card(subject_text: str, series_text: str, card_name: str, set_name: str, card_number: str) -> bool:
+    """
+    Confirms a single Alt search-result row is actually the card we
+    searched for, not just something Alt's fuzzy search decided was
+    close enough. Both checks must pass:
+
+    1. The row's own printed card number (from subject-card-number,
+       e.g. "Flygon #5" -> "5") must exactly equal the card's stored
+       card_number. This alone catches most cross-printing contamination
+       (different variant/subset = different number on the card).
+    2. The row's year/set text (year-brand-variety, e.g. "2009 Pokemon
+       Platinum Rising Rivals") must contain a recognizable word from
+       the requested set_name. Catches the rarer case of two different
+       sets both printing the same name at the same number.
+
+    If the card has no stored card_number, the number check can't run --
+    fall back to requiring the row's name portion to equal card_name
+    exactly (case-insensitive), which is stricter to compensate for the
+    missing signal.
+    """
+    number_match = ROW_NUMBER_PATTERN.search(subject_text)
+
+    if card_number:
+        if not number_match:
+            return False
+        if _normalize_number(number_match.group(1)) != _normalize_number(card_number):
+            return False
+    else:
+        row_name = subject_text[: number_match.start()].strip() if number_match else subject_text.strip()
+        if row_name.lower() != card_name.strip().lower():
+            return False
+
+    set_words = _set_name_words(set_name)
+    series_lower = series_text.lower()
+    if not any(word in series_lower for word in set_words):
+        return False
+
+    return True
 
 
 def _is_crash_error(err: Exception) -> bool:
@@ -155,6 +242,7 @@ class AltScraper(BaseSaleScraper):
                 rows = await page.locator(".virtuoso-grid-item").all()
 
                 records: list[SaleRecord] = []
+                rejected_count = 0
                 for row in rows:
                     try:
                         grade_text = await row.locator('[data-testid^="grade-"]').inner_text()
@@ -168,6 +256,28 @@ class AltScraper(BaseSaleScraper):
                         continue
                     grader = match.group(1).upper()
                     grade = match.group(2)
+
+                    # Identity check: Alt's search is fuzzy and routinely mixes
+                    # in other printings even when the query already has the
+                    # number and set in it (verified live -- see module
+                    # docstring point 7). A row that doesn't clear this check
+                    # is dropped entirely, never written to market_sales.
+                    try:
+                        subject_text = await row.locator('[data-testid^="subject-card-number-"]').inner_text()
+                        series_text = await row.locator('[data-testid^="year-brand-variety-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        rejected_count += 1
+                        continue  # can't confirm identity without these -- reject rather than guess
+
+                    if not _row_matches_card(subject_text, series_text, card_name, set_name, card_number):
+                        rejected_count += 1
+                        self.logger.debug(
+                            f"Rejected non-matching row for '{search_query}': "
+                            f"subject='{subject_text}' series='{series_text}'"
+                        )
+                        continue
 
                     try:
                         price_text = await row.locator('[data-testid^="sold-price-"]').inner_text()
@@ -225,6 +335,12 @@ class AltScraper(BaseSaleScraper):
                             source=source,
                             source_url=source_url,
                         )
+                    )
+
+                if rejected_count:
+                    self.logger.info(
+                        f"'{search_query}': accepted {len(records)}, rejected {rejected_count} "
+                        f"non-matching row(s) on identity check"
                     )
 
                 return records

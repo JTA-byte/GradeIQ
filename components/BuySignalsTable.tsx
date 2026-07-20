@@ -450,6 +450,9 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
         <span className={`px-2 py-0.5 uppercase tracking-widest text-[10px] ${CONFIDENCE_STYLE[s.priceConfidence]}`}>
           {s.priceConfidence}
         </span>
+        <span title="0-100: sale volume, recency, price consistency, and whether the raw price is real vs. estimated">
+          Data quality: <span className="text-ink font-bold">{s.dataQualityScore}</span>
+        </span>
         {s.lastSaleDate && <span>Last sold {formatDate(s.lastSaleDate)}</span>}
       </div>
 
