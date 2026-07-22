@@ -36,4 +36,11 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          # Also optional -- without INTERNAL_API_KEY, fetch_buy_signal()
+          # skips the call and the email just omits IQ score/ROI%/max buy
+          # price/eBay+GradeIQ links. Must match the INTERNAL_API_KEY env
+          # var set on the Vercel deployment for app/api/buy-signals/
+          # [cardId]/route.ts to accept these calls.
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          GRADEIQ_APP_URL: ${{ vars.GRADEIQ_APP_URL || 'https://gradeiq.net' }}
         run: python -m jobs.check_price_alerts

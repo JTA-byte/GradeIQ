@@ -116,7 +116,7 @@ export function SetsTable({ summaries }: { summaries: SetRoiSummary[] }) {
                 </td>
                 <td className="px-4 py-3">
                   <a
-                    href={`/buy-signals?set=${encodeURIComponent(s.setName)}`}
+                    href={`/sets/${encodeURIComponent(s.setName)}`}
                     className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors whitespace-nowrap"
                   >
                     View signals

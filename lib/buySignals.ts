@@ -594,17 +594,198 @@ async function fetchCards(supabase: ReturnType<typeof createServiceRoleClient>):
   }
 }
 
-export async function getBuySignals(): Promise<BuySignal[]> {
-  const supabase = createServiceRoleClient();
+/**
+ * Single-card version of fetchMarketSales() -- scoped with .eq() instead
+ * of the full-table paginated fetch, for getBuySignalForCard(). A single
+ * card's sale history is always well under PostgREST's 1000-row page
+ * cap, so no pagination loop is needed here.
+ */
+async function fetchSalesForCard(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  cardId: string
+): Promise<MarketSaleRow[]> {
+  try {
+    const { data, error } = await supabase
+      .from("market_sales")
+      .select("card_id, grader, grade, sale_price, sale_date, source, source_url")
+      .eq("card_id", cardId);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MarketSaleRow[];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("source_url")) throw err;
 
-  const [sales, cards, gemRateRows] = await Promise.all([
-    fetchMarketSales(supabase),
-    fetchCards(supabase),
-    fetchAllRows<GemRateRow>(supabase, "gem_rates", "card_id, grader, total_pop, gem_rate, scraped_at"),
-  ]);
+    const { data, error } = await supabase
+      .from("market_sales")
+      .select("card_id, grader, grade, sale_price, sale_date, source")
+      .eq("card_id", cardId);
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Omit<MarketSaleRow, "source_url">[]).map((r) => ({ ...r, source_url: null }));
+  }
+}
 
-  const cardById = new Map(cards.map((c) => [c.id, c]));
-  const salesByCard = groupBy(sales, (s) => s.card_id);
+/** Single-card version of fetchCards() -- see fetchSalesForCard() above. */
+async function fetchCardById(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  cardId: string
+): Promise<CardRow | null> {
+  try {
+    const { data, error } = await supabase
+      .from("cards")
+      .select("id, name, set_name, card_number, language, variant, variant_detail")
+      .eq("id", cardId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data as CardRow | null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("variant") && !message.includes("language")) throw err;
+
+    const { data, error } = await supabase
+      .from("cards")
+      .select("id, name, set_name, card_number")
+      .eq("id", cardId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    return { ...data, language: null, variant: null, variant_detail: null } as CardRow;
+  }
+}
+
+/**
+ * All the per-card work that turns raw market_sales rows into a single
+ * BuySignal: picking the best grader, applying the min-sales and
+ * graded/raw-ratio data-quality gates, and building the display fields.
+ * Extracted so getBuySignalForCard() (used by the price-alert email API,
+ * app/api/buy-signals/[cardId]/route.ts) can compute one card's signal
+ * without getBuySignals()'s full-table fetch and pass over every card in
+ * the DB -- calling the full version per alert would mean fully
+ * recomputing ~3,000+ cards' signals just to email one of them.
+ */
+function buildSignalForCard(
+  cardId: string,
+  card: CardRow,
+  cardSales: MarketSaleRow[],
+  gemRatesByCardGrader: Map<string, GemRateRow[]>,
+  latestGemRateByCardGrader: Map<string, GemRateRow>
+): BuySignal | null {
+  const rawSales = cardSales.filter((s) => s.grade === "Raw");
+  const realRawMarketPrice = rawSales.length > 0 ? average(rawSales.map((s) => s.sale_price)) : null;
+
+  const gradedSales = cardSales.filter((s) => s.grade !== "Raw");
+  const salesByGrader = groupBy(gradedSales, (s) => s.grader ?? "UNKNOWN");
+
+  let best: ReturnType<typeof evaluateCardForGrader> = null;
+
+  for (const [graderCode, graderSales] of salesByGrader.entries()) {
+    const gemRateKey = `${cardId}:${graderCode}`;
+    const popHistory: PopPoint[] = (gemRatesByCardGrader.get(gemRateKey) ?? []).map((r) => ({
+      totalPop: r.total_pop,
+      date: r.scraped_at,
+    }));
+
+    const evaluated = evaluateCardForGrader(
+      graderCode,
+      graderSales,
+      latestGemRateByCardGrader.get(gemRateKey),
+      popHistory,
+      realRawMarketPrice
+    );
+
+    if (evaluated && (!best || evaluated.iqScore > best.iqScore)) {
+      best = evaluated;
+    }
+  }
+
+  if (!best) return null;
+
+  if (best.saleCount < MIN_SALES_FOR_SIGNAL) {
+    return null; // too few sales to trust this card's price estimate at all
+  }
+
+  if (!best.isRawPriceEstimated && best.rawMarketPrice > 0) {
+    const gradedToRawRatio = best.topGradePrice / best.rawMarketPrice;
+    if (gradedToRawRatio > MAX_GRADED_TO_RAW_RATIO) {
+      console.warn(
+        `[buySignals] Excluding '${card.name}' (${card.set_name}) as unverified data: ` +
+          `${best.targetGradeLabel} avg $${Math.round(best.topGradePrice)} is ` +
+          `${gradedToRawRatio.toFixed(0)}x the real raw price $${Math.round(best.rawMarketPrice)}. ` +
+          `Review market_sales for card_id=${cardId} before re-including.`
+      );
+      return null;
+    }
+  }
+
+  const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
+  const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
+  const gapDollars = best.topGradePrice - best.rawMarketPrice;
+  const { trend, gradedPriceChangePct } = computeTrend(best.topSalesRows, rawSales);
+  const dataQualityScore = computeDataQualityScore({
+    saleCount: best.saleCount,
+    recentSaleCount90d: best.recentSaleCount90d,
+    isRawPriceEstimated: best.isRawPriceEstimated,
+    topSalePrices: best.topSalesRows.map((s) => s.sale_price),
+  });
+
+  const recentSales: RecentSaleDisplay[] = [...gradedSales]
+    .sort((a, b) => new Date(b.sale_date).getTime() - new Date(a.sale_date).getTime())
+    .slice(0, 5)
+    .map((s) => ({
+      grader: s.grader,
+      grade: s.grade,
+      price: s.sale_price,
+      date: s.sale_date,
+      source: s.source,
+      sourceLabel: SOURCE_DISPLAY[s.source] ?? s.source,
+      sourceUrl: s.source_url,
+    }));
+
+  return {
+    cardId,
+    cardName: card.name,
+    setName: card.set_name,
+    cardNumber: card.card_number,
+    language: card.language ?? "English",
+    variant: card.variant ?? "Normal",
+    variantDetail: card.variant_detail,
+    bestGrader: best.grader,
+    bestGraderName: `${graderConfig.name} ${graderConfig.tier}`,
+    targetGradeLabel: best.targetGradeLabel,
+    iqScore: best.iqScore,
+    iqLabel: best.iqLabel,
+    iqReason: best.iqReason,
+    whyReason: buildWhyReason({
+      cardName: card.name,
+      setName: card.set_name,
+      gemRatePct,
+      targetGradeLabel: best.targetGradeLabel,
+      gapDollars,
+      graderName: `${graderConfig.name} ${graderConfig.tier}`,
+      fee: graderConfig.fee,
+      expectedRoiPct: Math.round(best.roiPct * 10) / 10,
+    }),
+    expectedRoiPct: Math.round(best.roiPct * 10) / 10,
+    maxBuyPrice: best.maxBuyPrice,
+    gemRatePct,
+    rawMarketPrice: Math.round(best.rawMarketPrice * 100) / 100,
+    isRawPriceEstimated: best.isRawPriceEstimated,
+    topGradePrice: Math.round(best.topGradePrice * 100) / 100,
+    gapDollars: Math.round(gapDollars * 100) / 100,
+    saleCount: best.saleCount,
+    recentSaleCount90d: best.recentSaleCount90d,
+    priceConfidence: confidenceFor(best.recentSaleCount90d),
+    lastSaleDate: best.lastSaleDate,
+    recentSales,
+    trend,
+    gradedPriceChangePct,
+    dataQualityScore,
+  };
+}
+
+function latestGemRateMap(gemRateRows: GemRateRow[]): {
+  gemRatesByCardGrader: Map<string, GemRateRow[]>;
+  latestGemRateByCardGrader: Map<string, GemRateRow>;
+} {
   const gemRatesByCardGrader = groupBy(gemRateRows, (r) => `${r.card_id}:${r.grader}`);
 
   // Latest gem_rates row per (card, grader) -- gives the "current" gem
@@ -618,125 +799,56 @@ export async function getBuySignals(): Promise<BuySignal[]> {
     latestGemRateByCardGrader.set(key, latest);
   }
 
+  return { gemRatesByCardGrader, latestGemRateByCardGrader };
+}
+
+export async function getBuySignals(): Promise<BuySignal[]> {
+  const supabase = createServiceRoleClient();
+
+  const [sales, cards, gemRateRows] = await Promise.all([
+    fetchMarketSales(supabase),
+    fetchCards(supabase),
+    fetchAllRows<GemRateRow>(supabase, "gem_rates", "card_id, grader, total_pop, gem_rate, scraped_at"),
+  ]);
+
+  const cardById = new Map(cards.map((c) => [c.id, c]));
+  const salesByCard = groupBy(sales, (s) => s.card_id);
+  const { gemRatesByCardGrader, latestGemRateByCardGrader } = latestGemRateMap(gemRateRows);
+
   const signals: BuySignal[] = [];
 
   for (const [cardId, cardSales] of salesByCard.entries()) {
     const card = cardById.get(cardId);
     if (!card) continue;
 
-    const rawSales = cardSales.filter((s) => s.grade === "Raw");
-    const realRawMarketPrice = rawSales.length > 0 ? average(rawSales.map((s) => s.sale_price)) : null;
-
-    const gradedSales = cardSales.filter((s) => s.grade !== "Raw");
-    const salesByGrader = groupBy(gradedSales, (s) => s.grader ?? "UNKNOWN");
-
-    let best: ReturnType<typeof evaluateCardForGrader> = null;
-
-    for (const [graderCode, graderSales] of salesByGrader.entries()) {
-      const gemRateKey = `${cardId}:${graderCode}`;
-      const popHistory: PopPoint[] = (gemRatesByCardGrader.get(gemRateKey) ?? []).map((r) => ({
-        totalPop: r.total_pop,
-        date: r.scraped_at,
-      }));
-
-      const evaluated = evaluateCardForGrader(
-        graderCode,
-        graderSales,
-        latestGemRateByCardGrader.get(gemRateKey),
-        popHistory,
-        realRawMarketPrice
-      );
-
-      if (evaluated && (!best || evaluated.iqScore > best.iqScore)) {
-        best = evaluated;
-      }
-    }
-
-    if (best) {
-      if (best.saleCount < MIN_SALES_FOR_SIGNAL) {
-        continue; // too few sales to trust this card's price estimate at all
-      }
-
-      if (!best.isRawPriceEstimated && best.rawMarketPrice > 0) {
-        const gradedToRawRatio = best.topGradePrice / best.rawMarketPrice;
-        if (gradedToRawRatio > MAX_GRADED_TO_RAW_RATIO) {
-          console.warn(
-            `[buySignals] Excluding '${card.name}' (${card.set_name}) as unverified data: ` +
-              `${best.targetGradeLabel} avg $${Math.round(best.topGradePrice)} is ` +
-              `${gradedToRawRatio.toFixed(0)}x the real raw price $${Math.round(best.rawMarketPrice)}. ` +
-              `Review market_sales for card_id=${cardId} before re-including.`
-          );
-          continue;
-        }
-      }
-
-      const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
-      const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
-      const gapDollars = best.topGradePrice - best.rawMarketPrice;
-      const { trend, gradedPriceChangePct } = computeTrend(best.topSalesRows, rawSales);
-      const dataQualityScore = computeDataQualityScore({
-        saleCount: best.saleCount,
-        recentSaleCount90d: best.recentSaleCount90d,
-        isRawPriceEstimated: best.isRawPriceEstimated,
-        topSalePrices: best.topSalesRows.map((s) => s.sale_price),
-      });
-
-      const recentSales: RecentSaleDisplay[] = [...gradedSales]
-        .sort((a, b) => new Date(b.sale_date).getTime() - new Date(a.sale_date).getTime())
-        .slice(0, 5)
-        .map((s) => ({
-          grader: s.grader,
-          grade: s.grade,
-          price: s.sale_price,
-          date: s.sale_date,
-          source: s.source,
-          sourceLabel: SOURCE_DISPLAY[s.source] ?? s.source,
-          sourceUrl: s.source_url,
-        }));
-
-      signals.push({
-        cardId,
-        cardName: card.name,
-        setName: card.set_name,
-        cardNumber: card.card_number,
-        language: card.language ?? "English",
-        variant: card.variant ?? "Normal",
-        variantDetail: card.variant_detail,
-        bestGrader: best.grader,
-        bestGraderName: `${graderConfig.name} ${graderConfig.tier}`,
-        targetGradeLabel: best.targetGradeLabel,
-        iqScore: best.iqScore,
-        iqLabel: best.iqLabel,
-        iqReason: best.iqReason,
-        whyReason: buildWhyReason({
-          cardName: card.name,
-          setName: card.set_name,
-          gemRatePct,
-          targetGradeLabel: best.targetGradeLabel,
-          gapDollars,
-          graderName: `${graderConfig.name} ${graderConfig.tier}`,
-          fee: graderConfig.fee,
-          expectedRoiPct: Math.round(best.roiPct * 10) / 10,
-        }),
-        expectedRoiPct: Math.round(best.roiPct * 10) / 10,
-        maxBuyPrice: best.maxBuyPrice,
-        gemRatePct,
-        rawMarketPrice: Math.round(best.rawMarketPrice * 100) / 100,
-        isRawPriceEstimated: best.isRawPriceEstimated,
-        topGradePrice: Math.round(best.topGradePrice * 100) / 100,
-        gapDollars: Math.round(gapDollars * 100) / 100,
-        saleCount: best.saleCount,
-        recentSaleCount90d: best.recentSaleCount90d,
-        priceConfidence: confidenceFor(best.recentSaleCount90d),
-        lastSaleDate: best.lastSaleDate,
-        recentSales,
-        trend,
-        gradedPriceChangePct,
-        dataQualityScore,
-      });
-    }
+    const signal = buildSignalForCard(cardId, card, cardSales, gemRatesByCardGrader, latestGemRateByCardGrader);
+    if (signal) signals.push(signal);
   }
 
   signals.sort((a, b) => b.iqScore - a.iqScore);
   return signals;
+}
+
+/**
+ * Same computation as getBuySignals(), scoped to a single card -- used by
+ * app/api/buy-signals/[cardId]/route.ts so the price-alert email job can
+ * pull one card's IQ score/ROI/max-buy-price without recomputing every
+ * card in the DB (see buildSignalForCard()'s docstring).
+ */
+export async function getBuySignalForCard(cardId: string): Promise<BuySignal | null> {
+  const supabase = createServiceRoleClient();
+
+  const card = await fetchCardById(supabase, cardId);
+  if (!card) return null;
+
+  const [cardSales, gemRateResult] = await Promise.all([
+    fetchSalesForCard(supabase, cardId),
+    supabase.from("gem_rates").select("card_id, grader, total_pop, gem_rate, scraped_at").eq("card_id", cardId),
+  ]);
+
+  const { gemRatesByCardGrader, latestGemRateByCardGrader } = latestGemRateMap(
+    (gemRateResult.data ?? []) as GemRateRow[]
+  );
+
+  return buildSignalForCard(cardId, card, cardSales, gemRatesByCardGrader, latestGemRateByCardGrader);
 }

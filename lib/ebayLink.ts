@@ -57,3 +57,15 @@ export function ebayRawSoldListingsUrl(card: CardIdentifierLike): string {
 export function ebayGradedSoldListingsUrl(card: CardIdentifierLike, gradeLabel: string): string {
   return buildUrl([...identifierParts(card), gradeLabel, "pokemon"].join(" "));
 }
+
+/**
+ * Currently active (buyable), cheapest-first raw listings for a card --
+ * for "go buy this now" flows like a triggered price alert email, as
+ * opposed to the sold-comps links above (used elsewhere for price
+ * verification, not purchasing). No LH_Complete/LH_Sold flags, and
+ * _sop=15 sorts by price + shipping, lowest first.
+ */
+export function ebayActiveRawListingsUrl(card: CardIdentifierLike): string {
+  const query = [...identifierParts(card), "ungraded", "pokemon"].join(" ");
+  return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&_sop=15`;
+}

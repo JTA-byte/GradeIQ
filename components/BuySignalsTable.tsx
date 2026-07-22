@@ -2,9 +2,10 @@
 
 import { useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import type { BuySignal, PriceConfidence, PriceTrend } from "@/lib/buySignals";
+import type { BuySignal, PriceConfidence } from "@/lib/buySignals";
 import { ebayGradedSoldListingsUrl, ebayRawSoldListingsUrl } from "@/lib/ebayLink";
 import { buildSaleListingUrl } from "@/lib/saleListingLink";
+import { TREND_BADGE } from "@/lib/trendBadge";
 
 type SortKey = "iqScore" | "expectedRoiPct" | "maxBuyPrice" | "gapDollars";
 type TrendFilter = "all" | "trending_up" | "stable" | "cooling";
@@ -19,12 +20,6 @@ const CONFIDENCE_STYLE: Record<PriceConfidence, string> = {
   high: "bg-moss/20 text-moss border border-moss",
   medium: "bg-gold/20 text-ink border border-gold",
   low: "bg-rust/10 text-rust border border-rust",
-};
-
-const TREND_BADGE: Record<PriceTrend, { label: string; className: string }> = {
-  trending_up: { label: "🔥 Trending Up", className: "bg-gold/20 text-ink border border-gold" },
-  cooling: { label: "❄️ Cooling", className: "bg-slate/10 text-slate border border-slate/40" },
-  stable: { label: "→ Stable", className: "text-slate/60" },
 };
 
 function formatDate(iso: string): string {
@@ -285,33 +280,39 @@ function HowToUseSection() {
         <span className="font-mono text-sm">{open ? "−" : "+"}</span>
       </button>
       {open && (
-        <div className="px-4 pb-4 space-y-3 font-body text-sm text-slate leading-relaxed border-t border-line pt-3">
+        <div className="px-4 pb-4 space-y-4 font-body text-sm text-slate leading-relaxed border-t border-line pt-3">
           <p>
             <span className="font-display text-ink">IQ Score</span> is a single 0-100 signal blending gem
-            rate, expected net ROI, recent sale-price momentum, and pop growth. Higher is a stronger
-            opportunity right now:{" "}
-            <span className="text-moss font-mono">70+ green</span>,{" "}
-            <span className="text-ink font-mono">50-69 yellow</span>,{" "}
-            <span className="text-rust font-mono">below 50 orange</span>.
+            rate, expected net ROI, recent sale-price momentum, and pop growth.{" "}
+            <span className="text-moss font-mono">70+ = strong opportunity</span>,{" "}
+            <span className="text-ink font-mono">50-69 = moderate</span>,{" "}
+            <span className="text-rust font-mono">below 50 = weak</span>.
           </p>
           <p>
-            <span className="font-display text-ink">Max Buy Price</span> is the most you could pay for a
-            raw copy and still hit a solid net ROI target with the recommended grader, after subtracting
-            grading fees, shipping, and platform fees from the expected graded sale price. Paying more than
-            this erodes the opportunity.
+            <span className="font-display text-ink">Max Buy Price</span> is the most you should pay for a
+            raw copy to hit a 50% net ROI after all grading, shipping, and selling fees. Paying more than
+            this erodes the opportunity below that target.
           </p>
           <p>
-            <span className="font-display text-ink">Price confidence</span> reflects how many real sales
-            back a card&apos;s numbers in the last 90 days: <span className="text-moss">High</span> (10+
-            sales), <span className="text-ink">Medium</span> (5-9 sales), or{" "}
-            <span className="text-rust">Low</span> (under 5 sales -- treat the price as a rough estimate,
-            not a firm number).
+            <span className="font-display text-ink">Price confidence</span> reflects how many real
+            target-grade sales back a card&apos;s numbers in the last 90 days:{" "}
+            <span className="text-moss">High</span> = 10+ sales,{" "}
+            <span className="text-ink">Medium</span> = 5-9 sales,{" "}
+            <span className="text-rust">Low</span> = under 5 sales -- treat with caution.
           </p>
-          <p>
-            <span className="font-display text-ink">Acting on a signal:</span> find a raw copy at or below
-            the Max Buy Price, confirm its condition matches what the target grade needs, then send it to
-            the recommended grader. The gap and confidence badge tell you how much conviction to have
-            before you commit money.
+          <div>
+            <p className="font-display text-ink mb-1.5">How to act on a signal</p>
+            <ol className="list-decimal list-inside space-y-1">
+              <li>Check the IQ Score -- 70+ is where to focus first.</li>
+              <li>Click &quot;Find raw on eBay&quot; to see current listings.</li>
+              <li>Only buy if a copy is listed at or below the Max Buy Price.</li>
+              <li>Submit it to the recommended grader shown on the card.</li>
+              <li>Track it in your Portfolio once it&apos;s sent for grading.</li>
+            </ol>
+          </div>
+          <p className="bg-rust/10 border border-rust text-rust px-3 py-2 font-mono text-xs leading-relaxed">
+            Buy Signals are financial estimates based on recent sales data. Past performance does not
+            guarantee future results. Always verify current prices before purchasing.
           </p>
         </div>
       )}
@@ -319,12 +320,13 @@ function HowToUseSection() {
   );
 }
 
-function BuySignalCard({ signal: s }: { signal: BuySignal }) {
+export function BuySignalCard({ signal: s }: { signal: BuySignal }) {
   const [salesOpen, setSalesOpen] = useState(false);
   const [watchlistState, setWatchlistState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [alertOpen, setAlertOpen] = useState(false);
   const [alertPrice, setAlertPrice] = useState(() => String(Math.round(s.maxBuyPrice)));
   const [alertState, setAlertState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [whyExpanded, setWhyExpanded] = useState(false);
 
   const cardIdentifier = {
     cardName: s.cardName,
@@ -457,7 +459,21 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
       </div>
 
       {/* Why this card */}
-      <p className="font-body text-sm text-slate leading-relaxed border-t border-line pt-3">{s.whyReason}</p>
+      <div className="border-t border-line pt-3">
+        <p
+          className={`font-body text-sm text-slate leading-relaxed ${
+            whyExpanded ? "" : "line-clamp-2 sm:line-clamp-none"
+          }`}
+        >
+          {s.whyReason}
+        </p>
+        <button
+          onClick={() => setWhyExpanded((v) => !v)}
+          className="sm:hidden font-mono text-[10px] uppercase tracking-widest text-moss hover:underline mt-1"
+        >
+          {whyExpanded ? "Show less" : "Read more"}
+        </button>
+      </div>
 
       {/* Recent graded sales */}
       <div className="border-t border-line pt-3">
@@ -493,12 +509,12 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
       </div>
 
       {/* Actions */}
-      <div className="flex flex-wrap gap-2 border-t border-line pt-3">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 border-t border-line pt-3">
         <a
           href={ebayRawSoldListingsUrl(cardIdentifier)}
           target="_blank"
           rel="noopener noreferrer"
-          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+          className="w-full sm:w-auto text-center font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
         >
           Find raw on eBay
         </a>
@@ -506,14 +522,14 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           href={ebayGradedSoldListingsUrl(cardIdentifier, s.targetGradeLabel)}
           target="_blank"
           rel="noopener noreferrer"
-          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+          className="w-full sm:w-auto text-center font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
         >
           Find graded on eBay
         </a>
         <button
           onClick={addToWatchlist}
           disabled={watchlistState === "saving" || watchlistState === "saved"}
-          className="font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-1.5 hover:bg-moss transition-colors disabled:opacity-50"
+          className="w-full sm:w-auto font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-1.5 hover:bg-moss transition-colors disabled:opacity-50"
         >
           {watchlistState === "saved"
             ? "Added to watchlist"
@@ -525,14 +541,14 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
         </button>
         <button
           onClick={() => setAlertOpen((v) => !v)}
-          className="font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
+          className="w-full sm:w-auto font-mono text-[10px] uppercase tracking-widest border border-line px-3 py-1.5 hover:border-moss hover:text-moss transition-colors"
         >
           Set Price Alert
         </button>
       </div>
 
       {alertOpen && (
-        <div className="flex flex-wrap items-end gap-2 border-t border-line pt-3">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2 border-t border-line pt-3">
           <div>
             <label className="block font-mono text-[10px] uppercase tracking-widest text-slate/70 mb-1">
               Notify when raw price drops below
@@ -542,13 +558,13 @@ function BuySignalCard({ signal: s }: { signal: BuySignal }) {
               step="0.01"
               value={alertPrice}
               onChange={(e) => setAlertPrice(e.target.value)}
-              className="w-28 border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
+              className="w-full sm:w-28 border border-line bg-white/60 px-2 py-1.5 font-mono text-sm focus:outline-none focus:border-moss"
             />
           </div>
           <button
             onClick={createPriceAlert}
             disabled={alertState === "saving" || alertState === "saved"}
-            className="font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-2 hover:bg-moss transition-colors disabled:opacity-50"
+            className="w-full sm:w-auto font-mono text-[10px] uppercase tracking-widest bg-ink text-paper px-3 py-2 hover:bg-moss transition-colors disabled:opacity-50"
           >
             {alertState === "saved"
               ? "Alert created"
