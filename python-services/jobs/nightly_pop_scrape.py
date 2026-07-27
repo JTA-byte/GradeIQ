@@ -4,11 +4,18 @@ Nightly pop report scraping job.
 Orchestrates all four grader scrapers (PSA, CGC, BGS, TAG) across every
 card in the database and writes results into the gem_rates table.
 
+NOT ON A SCHEDULE ANYMORE (.github/workflows/nightly-pop-scrape.yml) --
+PSA/CGC/BGS/TAG's bot detection blocks every request after ~3 hours of
+scraping, so running this nightly just burned CI minutes on a job that
+reliably fails partway through. Real gem-rate data now comes from manual
+entry (app/admin/gem-rates, see gem_rates.manually_entered) and,
+eventually, GemRate's paid population-data API (gemrate.com) instead.
+This module is left in place and still runs fine by hand (workflow_dispatch,
+or the command below) in case that changes -- see the workflow file's
+comment for the full reasoning.
+
 Run manually:
   python -m jobs.nightly_pop_scrape
-
-Run on a schedule (Render/Railway cron, or a plain crontab entry):
-  0 3 * * * cd /path/to/python-services && python -m jobs.nightly_pop_scrape
 
 Designed to run once per night. With the default 2.5s+ rate limit per
 grader and four graders running concurrently, scraping ~500 cards takes

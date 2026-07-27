@@ -43,6 +43,13 @@ create table gem_rates (
   gem_rate numeric generated always as (
     case when total_pop > 0 then round((top_grade_pop::numeric / total_pop) * 100, 2) else 0 end
   ) stored,
+  -- true when entered by hand via app/admin/gem-rates (someone looked the
+  -- card up directly on PSA/CGC's own site), false for a row written by
+  -- python-services/jobs/nightly_pop_scrape.py. Distinguishes real,
+  -- current numbers from scraper output now that PSA/CGC/BGS/TAG's bot
+  -- detection has made the scraper unreliable -- see that job's
+  -- docstring for the full story.
+  manually_entered boolean not null default false,
   scraped_at timestamptz default now()
 );
 

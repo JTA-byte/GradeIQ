@@ -1,8 +1,19 @@
 name: Nightly pop report scrape
 
+# Scheduled run disabled -- PSA/CGC/BGS/TAG's bot detection was blocking
+# every request after ~3 hours of scraping, so this was burning CI
+# minutes on a job that reliably degrades into all failures partway
+# through and risks getting GitHub Actions' IP ranges blocked harder.
+# Real population/gem-rate data now comes from two other places instead:
+#   1. app/admin/gem-rates -- manual entry for cards worth hand-checking
+#      on PSA/CGC's own sites (see gem_rates.manually_entered column)
+#   2. GemRate (gemrate.com) -- a legitimate paid API aggregating PSA/
+#      Beckett/SGC/CGC population data across all four graders in one
+#      call; sales-contact-only pricing (email support@gemrate.com), not
+#      yet integrated. Worth revisiting if manual entry doesn't scale.
+# workflow_dispatch is kept so this can still be run by hand if bot
+# detection ever eases up or a proxy strategy gets built.
 on:
-  schedule:
-    - cron: "0 3 * * *" # 3am UTC daily
   workflow_dispatch: {} # allows manual triggering from the Actions tab
 
 jobs:
