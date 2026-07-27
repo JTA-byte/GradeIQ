@@ -4,25 +4,30 @@
  *
  * Reality check done before writing this (query the live DB, don't
  * assume): `gem_rates` is currently EMPTY -- the PSA/CGC/BGS/TAG pop
- * scrapers (python-services/scrapers/{psa,cgc,bgs,tag}_scraper.py) were
- * never fixed with real selectors the way alt_scraper.py was, so no pop
- * report has ever actually been written. `market_sales` has real graded
- * data from Alt.xyz (source 'alt' or 'ebay_sold' comps it aggregates) --
- * TAG isn't tracked by Alt at all, and SGC sales exist but aren't one of
- * GradeIQ's 4 supported graders, so both are skipped here. As of the
- * PriceCharting scraper rewrite (see python-services/scrapers/
- * pricecharting_scraper.py), `market_sales` also gains real *raw*
- * (grade = 'Raw', grader = null, source = 'pricecharting') sale rows
- * once the nightly job has run against a card -- rawMarketPrice below
- * uses those when present instead of an estimate.
+ * scrapers got bot-detected after ~3 hours of running and are disabled
+ * (see python-services/jobs/nightly_pop_scrape.py), and manual entry
+ * (app/admin/gem-rates) only covers whatever's been hand-entered so far.
+ * `market_sales` has real graded data from Alt.xyz (source 'alt' or
+ * 'ebay_sold' comps it aggregates) -- TAG isn't tracked by Alt at all,
+ * and SGC sales exist but aren't one of GradeIQ's 4 supported graders,
+ * so both are skipped here. As of the PriceCharting scraper rewrite (see
+ * python-services/scrapers/pricecharting_scraper.py), `market_sales`
+ * also gains real *raw* (grade = 'Raw', grader = null, source =
+ * 'pricecharting') sale rows once the nightly job has run against a
+ * card -- rawMarketPrice below uses those when present instead of an
+ * estimate.
  *
- * Practical effect: gemRatePct is 0 for every card today (there's
- * nothing real to report), and pop growth has no history to compute
- * from either -- both default to iqScore.ts's built-in neutral handling.
- * IQ scores right now are effectively driven by ROI% and price momentum
- * (60% of the weight) until the pop scrapers get fixed. This is honest,
- * not a bug -- scores will improve in signal quality as real pop data
- * starts flowing in, same as the rest of this app's mock-to-real story.
+ * Practical effect: gemRatePct uses a real gem_rates row when one
+ * exists, falls back to computeImpliedGemRate() (top-grade sold-listing
+ * share, see its docstring) when there are 5+ graded market_sales for
+ * that card/grader, and is 0 only when neither exists -- flagged via
+ * isGemRateImplied so the UI and whyReason text can be honest about
+ * which case it's in. Pop growth still has no history to compute from
+ * either way (gem_rates has nothing to snapshot over time yet) and
+ * defaults to iqScore.ts's built-in neutral handling. This is honest,
+ * not a bug -- scores will keep improving in signal quality as real pop
+ * data starts flowing in, same as the rest of this app's mock-to-real
+ * story.
  *
  * Raw/ungraded price falls back to an estimated fraction of top-grade
  * price (clearly flagged via isRawPriceEstimated) only when no real
@@ -90,6 +95,13 @@ const RECENT_SALE_WINDOW_DAYS = 90;
 // considering whether either of those sales is itself bad data.
 const MIN_SALES_FOR_SIGNAL = 3;
 
+// A card/grader needs at least this many graded market_sales rows before
+// computeImpliedGemRate() below will produce a number at all -- fewer
+// than this and one early PSA 10 sale could swing the "rate" from 0% to
+// 100%. See computeImpliedGemRate()'s own docstring for what this is a
+// proxy for and why it's not the same thing as a real population report.
+const MIN_SALES_FOR_IMPLIED_GEM_RATE = 5;
+
 // If the graded (top-grade) average is more than this many multiples of
 // the real raw price, something upstream is almost certainly wrong --
 // either scraper contamination (a different, more valuable printing) or
@@ -132,7 +144,8 @@ export interface BuySignal {
   whyReason: string;
   expectedRoiPct: number;
   maxBuyPrice: number;
-  gemRatePct: number; // 0 today -- see file header
+  gemRatePct: number; // real gem_rates value if one exists, else an implied estimate (see isGemRateImplied), else 0
+  isGemRateImplied: boolean; // true when gemRatePct came from computeImpliedGemRate() rather than a verified gem_rates row
   rawMarketPrice: number;
   isRawPriceEstimated: boolean;
   topGradePrice: number;
@@ -228,19 +241,33 @@ function buildWhyReason(params: {
   cardName: string;
   setName: string;
   gemRatePct: number;
+  isGemRateImplied: boolean;
   targetGradeLabel: string;
   gapDollars: number;
   graderName: string;
   fee: number;
   expectedRoiPct: number;
 }): string {
-  const { cardName, setName, gemRatePct, targetGradeLabel, gapDollars, graderName, fee, expectedRoiPct } =
-    params;
+  const {
+    cardName,
+    setName,
+    gemRatePct,
+    isGemRateImplied,
+    targetGradeLabel,
+    gapDollars,
+    graderName,
+    fee,
+    expectedRoiPct,
+  } = params;
 
-  // Only cite a gem rate when there's a real one to cite -- gem_rates is
-  // empty today (see file header), and a fabricated "0% gem rate" clause
-  // would read like a real, bad number rather than "we have no data yet".
-  const gemClause = gemRatePct > 0 ? ` a ${gemRatePct.toFixed(0)}% ${targetGradeLabel} gem rate and` : "";
+  // Only cite a gem rate when there's a real or implied one to cite --
+  // with neither, a fabricated "0% gem rate" clause would read like a
+  // real, bad number rather than "we have no data yet". When it's implied
+  // (computeImpliedGemRate(), not a verified gem_rates row), say so --
+  // it's a real signal but a weaker one, and shouldn't be presented with
+  // the same confidence as a true population-report rate.
+  const article = isGemRateImplied ? "an implied" : "a";
+  const gemClause = gemRatePct > 0 ? ` ${article} ${gemRatePct.toFixed(0)}% ${targetGradeLabel} gem rate and` : "";
 
   return (
     `${cardName} from ${setName} has${gemClause} a $${Math.round(gapDollars).toLocaleString()} ` +
@@ -248,6 +275,30 @@ function buildWhyReason(params: {
     `${expectedRoiPct >= 0 ? "+" : ""}${expectedRoiPct.toFixed(0)}% expected net ROI make this one of the ` +
     `stronger opportunities in today's signals.`
   );
+}
+
+/**
+ * A real, from-actual-sales gem rate estimate for when gem_rates has
+ * nothing for this card/grader -- true for every card today, since the
+ * PSA/CGC/BGS/TAG pop scrapers are currently disabled after getting bot-
+ * detected (see python-services/jobs/nightly_pop_scrape.py). Rather than
+ * default straight to 0% (pretending there's no signal at all) or wait
+ * on scraping/manual entry, this counts what's already sitting in
+ * market_sales: top-grade sales / all graded sales for this grader.
+ *
+ * This is NOT the same thing as a true population-report gem rate, and
+ * callers must not treat it as equally trustworthy -- it's a rate among
+ * SOLD copies, which skews toward whatever grade collectors actually
+ * list and buy most often on the secondary market (often the top grade,
+ * since that's what's worth grading and reselling), not the true
+ * distribution of every submitted copy. It's still real signal from
+ * data this app already has, though, so it's used as a labeled "implied"
+ * fallback (see isGemRateImplied on BuySignal) rather than a fabricated
+ * 0%, until real gem_rates data exists for a card.
+ */
+function computeImpliedGemRate(topGradeCount: number, totalGradedCount: number): number | null {
+  if (totalGradedCount < MIN_SALES_FOR_IMPLIED_GEM_RATE) return null;
+  return Math.round((topGradeCount / totalGradedCount) * 1000) / 10;
 }
 
 /**
@@ -276,6 +327,8 @@ function evaluateCardForGrader(
   recentSaleCount90d: number;
   lastSaleDate: string | null;
   topSalesRows: MarketSaleRow[];
+  gemRatePct: number;
+  isGemRateImplied: boolean;
 } | null {
   const graderConfig = GRADERS.find((g) => g.id === graderCode.toLowerCase());
   if (!graderConfig) return null; // not one of GradeIQ's 4 supported graders (e.g. SGC)
@@ -295,7 +348,13 @@ function evaluateCardForGrader(
   const rawMarketPrice = realRawMarketPrice ?? topGradePrice * ESTIMATED_RAW_TO_TOP_GRADE_RATIO;
   const rawCost = rawMarketPrice * 0.85;
 
-  const gemRatePct = gemRateRow?.gem_rate ?? 0;
+  // Real gem_rates data wins when it exists; otherwise fall back to the
+  // implied rate computed from this grader's own sold listings (see
+  // computeImpliedGemRate()'s docstring), and only then to 0 (no signal
+  // at all -- fewer than MIN_SALES_FOR_IMPLIED_GEM_RATE graded sales).
+  const impliedGemRate = computeImpliedGemRate(topSales.length, graderSales.length);
+  const isGemRateImplied = gemRateRow === undefined && impliedGemRate !== null;
+  const gemRatePct = gemRateRow?.gem_rate ?? impliedGemRate ?? 0;
 
   const market: CardMarketData = {
     rawCost,
@@ -375,6 +434,8 @@ function evaluateCardForGrader(
     recentSaleCount90d,
     lastSaleDate,
     topSalesRows: topSales,
+    gemRatePct,
+    isGemRateImplied,
   };
 }
 
@@ -717,7 +778,7 @@ function buildSignalForCard(
   }
 
   const graderConfig = GRADERS.find((g) => g.id === best!.grader)!;
-  const gemRatePct = latestGemRateByCardGrader.get(`${cardId}:${best.grader.toUpperCase()}`)?.gem_rate ?? 0;
+  const { gemRatePct, isGemRateImplied } = best;
   const gapDollars = best.topGradePrice - best.rawMarketPrice;
   const { trend, gradedPriceChangePct } = computeTrend(best.topSalesRows, rawSales);
   const dataQualityScore = computeDataQualityScore({
@@ -758,6 +819,7 @@ function buildSignalForCard(
       cardName: card.name,
       setName: card.set_name,
       gemRatePct,
+      isGemRateImplied,
       targetGradeLabel: best.targetGradeLabel,
       gapDollars,
       graderName: `${graderConfig.name} ${graderConfig.tier}`,
@@ -767,6 +829,7 @@ function buildSignalForCard(
     expectedRoiPct: Math.round(best.roiPct * 10) / 10,
     maxBuyPrice: best.maxBuyPrice,
     gemRatePct,
+    isGemRateImplied,
     rawMarketPrice: Math.round(best.rawMarketPrice * 100) / 100,
     isRawPriceEstimated: best.isRawPriceEstimated,
     topGradePrice: Math.round(best.topGradePrice * 100) / 100,

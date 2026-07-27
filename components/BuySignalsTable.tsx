@@ -300,6 +300,14 @@ function HowToUseSection() {
             <span className="text-ink">Medium</span> = 5-9 sales,{" "}
             <span className="text-rust">Low</span> = under 5 sales -- treat with caution.
           </p>
+          <p>
+            <span className="font-display text-ink">Gem rate</span> shown as{" "}
+            <span className="text-moss">Verified</span> comes from a real PSA/CGC/BGS/TAG population
+            report. <span className="text-ink">Implied</span> means there&apos;s no population report yet,
+            so it&apos;s estimated instead from the mix of grades in this card&apos;s own sold listings --
+            real signal, but a weaker one, since it reflects what collectors sell most often rather than
+            the true population.
+          </p>
           <div>
             <p className="font-display text-ink mb-1.5">How to act on a signal</p>
             <ol className="list-decimal list-inside space-y-1">
@@ -455,6 +463,26 @@ export function BuySignalCard({ signal: s }: { signal: BuySignal }) {
         <span title="0-100: sale volume, recency, price consistency, and whether the raw price is real vs. estimated">
           Data quality: <span className="text-ink font-bold">{s.dataQualityScore}</span>
         </span>
+        {s.gemRatePct > 0 && (
+          <span
+            title={
+              s.isGemRateImplied
+                ? "Estimated from the mix of grades in this card's sold listings -- not a real PSA/CGC/BGS/TAG population report"
+                : "From a real PSA/CGC/BGS/TAG population report"
+            }
+          >
+            Gem rate: <span className="text-ink font-bold">{s.gemRatePct.toFixed(0)}%</span>{" "}
+            <span
+              className={`px-1.5 py-0.5 uppercase tracking-widest text-[9px] ${
+                s.isGemRateImplied
+                  ? "bg-gold/20 text-ink border border-gold"
+                  : "bg-moss/20 text-moss border border-moss"
+              }`}
+            >
+              {s.isGemRateImplied ? "Implied" : "Verified"}
+            </span>
+          </span>
+        )}
         {s.lastSaleDate && <span>Last sold {formatDate(s.lastSaleDate)}</span>}
       </div>
 
