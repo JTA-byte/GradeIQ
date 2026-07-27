@@ -104,11 +104,6 @@ GRADE_PATTERN = re.compile(r"\b(PSA|BGS|CGC|SGC)\s*[- ]?(10|9\.5|9|8|PRI|BL)\b",
 DATE_PATTERN = re.compile(r"Sold\D*?([A-Za-z]{3}\s+\d{1,2},\s+\d{4})")
 PRICE_PATTERN = re.compile(r"[\d,]+\.?\d*")
 
-# Matches the trailing "#<number>" in a subject-card-number string like
-# "Flygon #5" or "Flygon Lv X #105". \S+ (not \d+) because some numbers
-# carry letters (promo codes like "SWSH001").
-ROW_NUMBER_PATTERN = re.compile(r"#\s*(\S+)\s*$")
-
 # Words too generic to prove a set match on their own -- "Pokemon",
 # "English", "Holo" etc. show up on nearly every row regardless of set,
 # so requiring one of these to match would make the set check meaningless.
@@ -118,13 +113,29 @@ _SET_WORD_STOPWORDS = {
 }
 
 
-def _normalize_number(raw: str) -> str:
-    """"5", "05", and "5/111" should all compare equal -- Alt renders a
-    bare number while a card's stored card_number occasionally carries a
-    "/total" suffix. Leading zeros are stripped the same way on both
-    sides so "05" (a printed leading zero, e.g. some Japanese sets)
-    matches "5"."""
-    return raw.strip().split("/")[0].lstrip("0") or "0"
+def _card_number_variants(card_number: str) -> list[str]:
+    """The string(s) to search for in a listing title: the full stored
+    card_number, and -- when it carries a "/total" suffix (e.g.
+    "215/203") -- also just the leading part ("215"), since listings on
+    Alt sometimes show the full "215/203" and sometimes abbreviate to
+    the bare number."""
+    card_number = card_number.strip()
+    variants = [card_number]
+    if "/" in card_number:
+        first_part = card_number.split("/")[0].strip()
+        if first_part and first_part not in variants:
+            variants.append(first_part)
+    return variants
+
+
+def _title_contains_card_number(title: str, card_number: str) -> bool:
+    """Digit-boundary substring search: "215" matches inside "#215/203"
+    or "Umbreon Vmax #215", but a shorter number doesn't false-match as a
+    fragment of a longer one (e.g. "21" inside "215")."""
+    for variant in _card_number_variants(card_number):
+        if re.search(r"(?<!\d)" + re.escape(variant) + r"(?!\d)", title):
+            return True
+    return False
 
 
 def _set_name_words(set_name: str) -> list[str]:
@@ -142,31 +153,32 @@ def _row_matches_card(subject_text: str, series_text: str, card_name: str, set_n
     searched for, not just something Alt's fuzzy search decided was
     close enough. Both checks must pass:
 
-    1. The row's own printed card number (from subject-card-number,
-       e.g. "Flygon #5" -> "5") must exactly equal the card's stored
-       card_number. This alone catches most cross-printing contamination
-       (different variant/subset = different number on the card).
+    1. The listing title (subject-card-number, e.g. "Umbreon Vmax #215")
+       must contain the card's number -- checked via _title_contains_card_number()
+       against both the full stored form ("215/203") and, since listings
+       often abbreviate, just the leading part ("215"). If the number
+       isn't found in the title at all, the sale is rejected outright.
+       This is the check that separates Umbreon VMAX's regular print
+       (#167/203) from its Alt Art secret rare (#215/203) -- confirmed
+       live that a bare "Umbreon VMAX" search on Alt mixes #101 (Japanese
+       VMAX Climax), #215 (Evolving Skies Secret Rare), and #TG23
+       (Brilliant Stars Trainer Gallery) into one result set, any of
+       which could otherwise get written against whichever Umbreon VMAX
+       printing this job happens to be scraping.
     2. The row's year/set text (year-brand-variety, e.g. "2009 Pokemon
        Platinum Rising Rivals") must contain a recognizable word from
        the requested set_name. Catches the rarer case of two different
        sets both printing the same name at the same number.
 
     If the card has no stored card_number, the number check can't run --
-    fall back to requiring the row's name portion to equal card_name
-    exactly (case-insensitive), which is stricter to compensate for the
-    missing signal.
+    fall back to requiring the card name to appear in the title, which
+    is looser but the best available signal.
     """
-    number_match = ROW_NUMBER_PATTERN.search(subject_text)
-
     if card_number:
-        if not number_match:
+        if not _title_contains_card_number(subject_text, card_number):
             return False
-        if _normalize_number(number_match.group(1)) != _normalize_number(card_number):
-            return False
-    else:
-        row_name = subject_text[: number_match.start()].strip() if number_match else subject_text.strip()
-        if row_name.lower() != card_name.strip().lower():
-            return False
+    elif card_name.strip().lower() not in subject_text.lower():
+        return False
 
     set_words = _set_name_words(set_name)
     series_lower = series_text.lower()
