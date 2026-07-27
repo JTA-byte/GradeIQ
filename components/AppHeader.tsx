@@ -65,6 +65,12 @@ export function AppHeader() {
             >
               Alerts
             </a>
+            <a
+              href="/deals"
+              className="font-mono text-xs text-slate hover:text-moss transition-colors"
+            >
+              Deals
+            </a>
           </nav>
         </div>
 

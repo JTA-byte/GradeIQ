@@ -1,0 +1,45 @@
+name: Scan active listings for deals
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours
+  workflow_dispatch: {} # allows manual triggering from the Actions tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # jobs/scan_active_listings.py deliberately scopes each run to a
+    # bounded slice of cards (--limit, default 300) rather than the full
+    # catalog -- see that job's docstring for why running this at
+    # nightly-price-scrape.yml's full-catalog scale 4x/day instead of
+    # once would risk the same bot-detection problem that took down the
+    # PSA/CGC/BGS/TAG pop scrapers. 60 minutes is generous for 300 cards.
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: python-services
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Scan active listings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Optional -- without these, listings are still scraped and
+          # written, just never flagged as deals (nothing to compare
+          # their price against). Must match the INTERNAL_API_KEY set on
+          # the Vercel deployment for app/api/buy-signals/[cardId] to
+          # accept these calls.
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          GRADEIQ_APP_URL: ${{ vars.GRADEIQ_APP_URL || 'https://gradeiq.net' }}
+        run: python -m jobs.scan_active_listings

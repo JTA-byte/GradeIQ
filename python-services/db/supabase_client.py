@@ -130,3 +130,55 @@ def write_sale_record(client: Client, card_id: str, record: SaleRecord) -> None:
     except Exception as e:
         logger.error(f"Failed to write sale record for card {card_id}: {e}")
         raise
+
+
+def write_active_listing(
+    client: Client,
+    card_id: str,
+    listing_url: str,
+    current_price: float,
+    auction_end_time: Optional[float],
+    grader: str,
+    grade: str,
+    is_deal: bool,
+    deal_discount_amount: Optional[float],
+) -> None:
+    """
+    Upserts (not inserts) an active_listings row, keyed on listing_url --
+    unlike market_sales/gem_rates, this table is a snapshot of what's
+    currently live on Alt, not a history to preserve. Re-scraping the
+    same still-active listing every 6 hours refreshes its price/deal
+    status in place instead of piling up duplicate rows for one auction.
+
+    Takes plain parameters rather than an ActiveListingRecord so this
+    generic db-client module doesn't need to import a type from a
+    specific scraper module (scrapers.alt_scraper) -- the caller (jobs/
+    scan_active_listings.py) unpacks its own record before calling this.
+    """
+    try:
+        client.table("active_listings").upsert(
+            {
+                "card_id": card_id,
+                "listing_url": listing_url,
+                "current_price": current_price,
+                "auction_end_time": (
+                    datetime.fromtimestamp(auction_end_time, tz=timezone.utc).isoformat()
+                    if auction_end_time is not None
+                    else None
+                ),
+                "grader": grader,
+                "grade": grade,
+                "source": "alt",
+                "is_deal": is_deal,
+                "deal_discount_amount": deal_discount_amount,
+                "scraped_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="listing_url",
+        ).execute()
+        logger.info(
+            f"Wrote active listing for card {card_id}: {grader} {grade} @ ${current_price}"
+            + (f" (DEAL, saves ${deal_discount_amount:.2f})" if is_deal else "")
+        )
+    except Exception as e:
+        logger.error(f"Failed to write active listing for card {card_id}: {e}")
+        raise

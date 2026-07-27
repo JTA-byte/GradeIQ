@@ -88,6 +88,8 @@ an earlier, unverified draft of this file:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright
@@ -103,6 +105,42 @@ from scrapers.base_scraper import (
 GRADE_PATTERN = re.compile(r"\b(PSA|BGS|CGC|SGC)\s*[- ]?(10|9\.5|9|8|PRI|BL)\b", re.IGNORECASE)
 DATE_PATTERN = re.compile(r"Sold\D*?([A-Za-z]{3}\s+\d{1,2},\s+\d{4})")
 PRICE_PATTERN = re.compile(r"[\d,]+\.?\d*")
+
+# Matches a countdown like "6D 3H", "2H 29M", or "45M" anywhere in a
+# row's plain text -- e.g. "10d 3h" or "45m". Any of the three components
+# can be absent (a listing closing within the hour shows no "d" at all),
+# but the lookahead requires at least one digit+unit pair to actually be
+# present, so this doesn't just match an empty string at the first
+# position of an unrelated row (a fully-optional group with no lookahead
+# would technically "match" nothing, anywhere, in any string).
+COUNTDOWN_PATTERN = re.compile(
+    r"(?=\d+\s*[dhm]\b)(?:(\d+)\s*d\b)?\s*(?:(\d+)\s*h\b)?\s*(?:(\d+)\s*m\b)?", re.IGNORECASE
+)
+
+
+@dataclass
+class ActiveListingRecord:
+    """A currently-live (not yet sold) Alt.xyz listing -- for
+    jobs/scan_active_listings.py, which compares these against a card's
+    Buy Signals max_buy_price to flag underpriced listings as deals."""
+    grader: str
+    grade: str
+    current_price: float
+    auction_end_time: float | None  # unix timestamp; None if no countdown found (e.g. a Buy Now listing)
+    listing_url: str
+
+
+def _parse_countdown(text: str) -> float | None:
+    """Converts "10d 3h" (time remaining) into an absolute unix timestamp
+    at parse time -- the countdown is relative, so it has to be resolved
+    against "now" the moment it's scraped, not stored as-is."""
+    match = COUNTDOWN_PATTERN.search(text)
+    if not match:
+        return None
+    days, hours, minutes = (int(g) if g else 0 for g in match.groups())
+    if days == 0 and hours == 0 and minutes == 0:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(days=days, hours=hours, minutes=minutes)).timestamp()
 
 # Words too generic to prove a set match on their own -- "Pokemon",
 # "English", "Holo" etc. show up on nearly every row regardless of set,
@@ -361,6 +399,142 @@ class AltScraper(BaseSaleScraper):
                 # If the page already crashed, close() itself can raise --
                 # swallow that so it doesn't shadow a real exception being
                 # propagated out of the try block above.
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+    async def fetch_active_listings(
+        self, card_name: str, set_name: str, card_number: str = ""
+    ) -> list[ActiveListingRecord]:
+        """
+        Same search + identity-check approach as fetch_sales(), but
+        without soldListings=true -- that param is what makes /browse
+        show completed sales; omitting it shows currently-live (unsold)
+        auctions and Buy Now listings instead. Confirmed live: the
+        year-brand-variety/subject-card-number/grade fields are identical
+        between the two views, but the price field is `list-price-N`
+        (current bid or Buy Now price) instead of `sold-price-N`.
+
+        The countdown ("6D 3H", "2H 29M") is read from the row's plain
+        text via COUNTDOWN_PATTERN, NOT a `data-testid="countdown-timer"`
+        element -- confirmed live that testid is unreliable in Alt's
+        virtualized (react-virtuoso) grid: some rows report it present
+        with no visible countdown text, others clearly showing "6D 3H" in
+        their rendered text don't have it at all. The plain-text regex
+        search works against what's actually rendered either way.
+        """
+        search_query = " ".join(part for part in [card_name, card_number, set_name] if part).strip()
+        search_url = f"{self.base_url}/browse?query={quote(search_query)}"
+
+        if not check_robots_allowed(search_url):
+            self.logger.warning(f"robots.txt disallows {search_url}, skipping")
+            return []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (compatible; GradeIQ-Bot/1.0; "
+                    "+https://gradeiq.app/bot-info)"
+                )
+            )
+            page = await context.new_page()
+
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+
+                try:
+                    await page.wait_for_selector(".virtuoso-grid-item", timeout=60000)
+                except Exception:
+                    self.logger.info(f"No active listings rendered for '{search_query}' on Alt")
+                    return []
+
+                rows = await page.locator(".virtuoso-grid-item").all()
+
+                records: list[ActiveListingRecord] = []
+                rejected_count = 0
+                for row in rows:
+                    try:
+                        grade_text = await row.locator('[data-testid^="grade-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        continue  # this row just doesn't have a grade element
+
+                    match = GRADE_PATTERN.search(grade_text)
+                    if not match:
+                        continue
+                    grader = match.group(1).upper()
+                    grade = match.group(2)
+
+                    # Same identity check as fetch_sales() -- Alt's search
+                    # is just as fuzzy for active listings as it is for
+                    # sold ones.
+                    try:
+                        subject_text = await row.locator('[data-testid^="subject-card-number-"]').inner_text()
+                        series_text = await row.locator('[data-testid^="year-brand-variety-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        rejected_count += 1
+                        continue
+
+                    if not _row_matches_card(subject_text, series_text, card_name, set_name, card_number):
+                        rejected_count += 1
+                        continue
+
+                    try:
+                        price_text = await row.locator('[data-testid^="list-price-"]').inner_text()
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        continue  # no price element -- shouldn't happen for a live listing, skip defensively
+
+                    price_match = PRICE_PATTERN.search(price_text.replace(",", ""))
+                    if not price_match:
+                        continue
+
+                    auction_end_time = None
+                    try:
+                        row_text = await row.inner_text()
+                        auction_end_time = _parse_countdown(row_text)
+                    except Exception as e:
+                        if _is_crash_error(e):
+                            raise
+                        # No countdown found is expected for a Buy Now
+                        # listing -- auction_end_time just stays None.
+
+                    listing_url = None
+                    try:
+                        href = await row.locator('a[href^="/itm/"]').first.get_attribute("href")
+                        if href:
+                            listing_url = f"{self.base_url}{href.split('?')[0]}"
+                    except Exception:
+                        pass
+
+                    if not listing_url:
+                        continue  # nothing to send a user to -- skip
+
+                    records.append(
+                        ActiveListingRecord(
+                            grader=grader,
+                            grade=grade,
+                            current_price=float(price_match.group(0)),
+                            auction_end_time=auction_end_time,
+                            listing_url=listing_url,
+                        )
+                    )
+
+                if rejected_count:
+                    self.logger.info(
+                        f"'{search_query}' (active): accepted {len(records)}, rejected {rejected_count} "
+                        f"non-matching row(s) on identity check"
+                    )
+
+                return records
+
+            finally:
                 try:
                     await browser.close()
                 except Exception:

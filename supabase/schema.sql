@@ -90,8 +90,55 @@ create table market_sales (
 
 create index idx_market_sales_card on market_sales (card_id, grader, grade, sale_date desc);
 
+-- Supports lib/deals.ts's "recent raw deals" query -- filtering by grade
+-- and sale_date WITHOUT a specific card_id (i.e. across every card at
+-- once) can't use idx_market_sales_card above, since card_id is that
+-- index's leading column. Confirmed live: without this, that query hit
+-- a DB statement timeout scanning the full table. Partial (where grade =
+-- 'Raw') since that's the only case this index needs to serve.
+create index idx_market_sales_raw_recent on market_sales (sale_date desc) where grade = 'Raw';
+
 alter table market_sales enable row level security;
 create policy "Anyone can read market_sales" on market_sales for select using (true);
+
+-- =========================================
+-- ACTIVE_LISTINGS: currently-live (not yet sold) Alt.xyz listings, from
+-- python-services/scrapers/alt_scraper.py's fetch_active_listings().
+--
+-- Unlike market_sales/gem_rates, this is a snapshot of what's live RIGHT
+-- NOW, not a history to preserve -- unique on listing_url so
+-- jobs/scan_active_listings.py (runs every 6 hours) upserts a still-active
+-- listing's price/deal status in place instead of piling up duplicate
+-- rows every time it re-scrapes the same auction. A listing that stops
+-- getting re-scraped (sold, ended, or no longer surfaced by Alt's search)
+-- simply goes stale rather than being actively deleted -- queries filter
+-- to recently-scraped rows (see app/deals/page.tsx) so stale listings
+-- fall out of view on their own without a cleanup job.
+--
+-- is_deal/deal_discount_amount are set by comparing current_price against
+-- the card's max_buy_price from Buy Signals (via the internal
+-- app/api/buy-signals/[cardId] endpoint -- see scan_active_listings.py)
+-- at scrape time, not recomputed on read.
+-- =========================================
+create table active_listings (
+  id uuid primary key default uuid_generate_v4(),
+  card_id uuid references cards(id) not null,
+  listing_url text not null unique,
+  current_price numeric not null,
+  auction_end_time timestamptz, -- null for a Buy Now listing with no countdown
+  grader text not null,
+  grade text not null,
+  source text not null check (source in ('alt')),
+  is_deal boolean not null default false,
+  deal_discount_amount numeric, -- max_buy_price - current_price when is_deal; null otherwise (no signal to compare against, or not a deal)
+  scraped_at timestamptz default now()
+);
+
+create index idx_active_listings_card on active_listings (card_id, scraped_at desc);
+create index idx_active_listings_deals on active_listings (is_deal, deal_discount_amount desc) where is_deal = true;
+
+alter table active_listings enable row level security;
+create policy "Anyone can read active_listings" on active_listings for select using (true);
 
 -- =========================================
 -- GRADER_EVENTS: news/context signals affecting grading decisions
