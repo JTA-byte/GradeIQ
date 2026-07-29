@@ -108,8 +108,26 @@ def write_pop_record(client: Client, card_id: str, record: PopRecord) -> None:
 
 def write_sale_record(client: Client, card_id: str, record: SaleRecord) -> None:
     """
-    Inserts a new market_sales row. Insert-only (never update), same
-    reasoning as write_pop_record -- preserves sale history over time.
+    Inserts a new market_sales row. Insert-only (never update) so sale
+    history over time is preserved -- but that's exactly what caused a
+    real production problem: PriceCharting/Alt's "last N days of sales"
+    searches return mostly the SAME underlying sales night after night,
+    and inserting every result unconditionally re-wrote the same sale
+    over and over on every nightly run. Confirmed live: one sample card
+    had 464 market_sales rows but only 129 actually-distinct sales (a
+    3.6x duplication ratio) -- across the whole table, that inflated
+    market_sales to 1.8M+ rows and was the real reason the Buy Signals
+    page was timing out in production (see lib/buySignals.ts).
+
+    idx_market_sales_dedup (supabase/schema.sql) is a unique index on
+    (card_id, coalesce(grader, ''), grade, sale_price, sale_date, source)
+    -- coalesce() because plain NULL columns are NOT considered equal to
+    each other in a unique constraint, which would otherwise let raw
+    (grader IS NULL) sales dedup incorrectly. A duplicate insert now
+    fails with a unique-violation (Postgres code 23505), which is the
+    *expected*, benign outcome of re-scraping a sale we already have --
+    logged at debug and swallowed, not raised, while any other failure
+    still raises as before.
     """
     try:
         client.table("market_sales").insert(
@@ -128,6 +146,9 @@ def write_sale_record(client: Client, card_id: str, record: SaleRecord) -> None:
             f"{record.grader or 'raw'} {record.grade} @ ${record.sale_price}"
         )
     except Exception as e:
+        if "23505" in str(e) or "duplicate key value violates unique constraint" in str(e):
+            logger.debug(f"Sale already recorded for card {card_id}, skipping: {e}")
+            return
         logger.error(f"Failed to write sale record for card {card_id}: {e}")
         raise
 

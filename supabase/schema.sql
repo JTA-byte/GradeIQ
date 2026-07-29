@@ -98,6 +98,20 @@ create index idx_market_sales_card on market_sales (card_id, grader, grade, sale
 -- 'Raw') since that's the only case this index needs to serve.
 create index idx_market_sales_raw_recent on market_sales (sale_date desc) where grade = 'Raw';
 
+-- Prevents python-services/db/supabase_client.py's write_sale_record()
+-- from re-inserting a sale it already has -- PriceCharting/Alt's "recent
+-- sales" searches return mostly the SAME underlying sales night after
+-- night, and without this, every nightly run re-wrote them. Confirmed
+-- live: one sample card had 464 rows for only 129 actually-distinct
+-- sales (3.6x duplication), which inflated the whole table to 1.8M+ rows
+-- and was the real cause of the Buy Signals page timing out in
+-- production. coalesce(grader, '') because plain NULL columns are never
+-- considered equal to each other in a unique constraint, which would
+-- otherwise let raw (grader IS NULL) sales dedup incorrectly.
+create unique index idx_market_sales_dedup on market_sales (
+  card_id, coalesce(grader, ''), grade, sale_price, sale_date, source
+);
+
 alter table market_sales enable row level security;
 create policy "Anyone can read market_sales" on market_sales for select using (true);
 

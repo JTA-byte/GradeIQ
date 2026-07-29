@@ -7,12 +7,18 @@ import { getBuySignals } from "@/lib/buySignals";
 // Render on-demand instead of pre-rendering at build time -- with
 // 2,220+ cards, the pre-rendered HTML for this page exceeds Vercel's
 // build output size limit (FALLBACK_BODY_TOO_LARGE at 19.71 MB).
+//
+// force-dynamic means Next's Full Route Cache never applies here, so a
+// `revalidate` export on this page would be a no-op -- it doesn't
+// actually cache anything once force-dynamic is set. The real caching
+// (recompute at most once an hour, not on every request) lives one
+// layer down: lib/buySignals.ts's getBuySignals() is wrapped in
+// unstable_cache. That's the fix for the production timeout that was
+// happening here -- getBuySignals() does a full pass over market_sales
+// (1.8M+ rows and growing), and re-running that on every single request
+// (which force-dynamic + no data-layer caching was doing) is what
+// actually caused it, not any single slow calculation.
 export const dynamic = "force-dynamic";
-
-// The underlying data (market_sales, gem_rates) only changes when the
-// nightly scrapers run, so there's no need to recompute this on every
-// request -- cache for an hour and let ISR revalidate in the background.
-export const revalidate = 3600;
 
 export default async function BuySignalsPage() {
   const signals = await getBuySignals();

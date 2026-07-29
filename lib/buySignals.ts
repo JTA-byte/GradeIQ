@@ -36,6 +36,7 @@
  * external calls per page load isn't practical, unlike the single-card
  * analyze flow in lib/mockDataService.ts, which still does exactly that).
  */
+import { unstable_cache } from "next/cache";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import {
   CardMarketData,
@@ -188,26 +189,68 @@ interface GemRateRow {
   scraped_at: string;
 }
 
+/**
+ * Fetches every row of `table`, working around PostgREST's 1000-row cap
+ * per request via keyset ("seek") pagination on the table's uuid `id`
+ * primary key -- `WHERE id > lastSeenId ORDER BY id LIMIT 1000` -- rather
+ * than offset pagination (`OFFSET n LIMIT 1000`).
+ *
+ * This distinction is why market_sales (1.8M+ rows) was timing out the
+ * Buy Signals page in production, not computeImpliedGemRate() (which is
+ * pure arithmetic on numbers already in memory, no query at all): an
+ * earlier version of this function fetched pages concurrently via
+ * `.range()`, which translates to SQL OFFSET -- and OFFSET's cost grows
+ * with how deep into the table it's skipping, so firing many deep-offset
+ * pages at once (some skipping close to a million rows each) is exactly
+ * what triggered "canceling statement due to statement timeout" when
+ * tested live against the real 1.8M-row table. Keyset pagination has no
+ * such penalty: `id > lastSeenId` is a direct index seek, equally fast
+ * (down to network latency) regardless of depth, so it can't time out
+ * this way no matter how large the table grows. The tradeoff is that it
+ * must run sequentially (each page's cursor depends on the previous
+ * page's last id) rather than concurrently -- see getBuySignals()'s
+ * unstable_cache wrapper for how the resulting cost is kept off the
+ * request path for real users regardless.
+ *
+ * `columns` doesn't need to include "id" -- it's added to the select
+ * automatically to drive the cursor, then present as an extra field on
+ * the returned rows (harmless: TypeScript's structural typing doesn't
+ * mind objects having more properties than their declared type lists).
+ */
 async function fetchAllRows<T>(
   supabase: ReturnType<typeof createServiceRoleClient>,
   table: string,
   columns: string
 ): Promise<T[]> {
+  // Exact column-name match, not a substring check -- "card_id" contains
+  // the substring "id" too, which previously made this skip appending the
+  // real `id` column whenever a caller's column list happened to include
+  // any column ending in "id" (card_id, grader...). That silently left
+  // every row's `id` as undefined, which serialized into the next page's
+  // `.gt("id", ...)` call as the literal string "undefined" and broke
+  // every table's pagination the moment a table had more than one page.
+  const hasIdColumn = columns.split(",").some((c) => c.trim() === "id");
   const all: T[] = [];
-  let offset = 0;
+  let lastId: string | null = null;
 
   while (true) {
-    const { data, error } = await supabase
+    let query = supabase
       .from(table)
-      .select(columns)
-      .range(offset, offset + PAGE_SIZE - 1);
+      .select(hasIdColumn ? columns : `${columns}, id`)
+      .order("id", { ascending: true })
+      .limit(PAGE_SIZE);
 
+    if (lastId !== null) {
+      query = query.gt("id", lastId);
+    }
+
+    const { data, error } = await query;
     if (error) throw new Error(`Failed to fetch ${table}: ${error.message}`);
     if (!data || data.length === 0) break;
 
     all.push(...(data as T[]));
     if (data.length < PAGE_SIZE) break;
-    offset += PAGE_SIZE;
+    lastId = (data[data.length - 1] as unknown as { id: string }).id;
   }
 
   return all;
@@ -865,7 +908,7 @@ function latestGemRateMap(gemRateRows: GemRateRow[]): {
   return { gemRatesByCardGrader, latestGemRateByCardGrader };
 }
 
-export async function getBuySignals(): Promise<BuySignal[]> {
+async function computeBuySignals(): Promise<BuySignal[]> {
   const supabase = createServiceRoleClient();
 
   const [sales, cards, gemRateRows] = await Promise.all([
@@ -891,6 +934,21 @@ export async function getBuySignals(): Promise<BuySignal[]> {
   signals.sort((a, b) => b.iqScore - a.iqScore);
   return signals;
 }
+
+/**
+ * Cached for an hour via Next's Data Cache (unstable_cache) -- computeBuySignals()
+ * does a full pass over market_sales (1.8M+ rows and growing ~18k/day),
+ * even after parallelizing fetchAllRows()'s pagination, so actually
+ * running it on every request is what made the Buy Signals page time
+ * out in production. Only the first request after each hour (or after
+ * this table's next relevant write, if a tag-based revalidation gets
+ * added later) pays that cost; Next serves the prior cached result while
+ * refreshing in the background otherwise (stale-while-revalidate), so a
+ * real user request essentially never blocks on it once the cache is warm.
+ */
+export const getBuySignals = unstable_cache(computeBuySignals, ["buy-signals"], {
+  revalidate: 3600,
+});
 
 /**
  * Same computation as getBuySignals(), scoped to a single card -- used by
