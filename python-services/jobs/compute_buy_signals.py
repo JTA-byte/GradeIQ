@@ -42,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("jobs.compute_buy_signals")
 
-GRADEIQ_APP_URL = os.environ.get("GRADEIQ_APP_URL", "https://gradeiq.net")
+GRADEIQ_APP_URL = os.environ.get("GRADEIQ_APP_URL", "https://www.gradeiq.net")
 
 # Generous -- the underlying getBuySignals() computation has taken up to
 # ~21 minutes against the live, not-yet-deduplicated market_sales table
@@ -68,6 +68,12 @@ def run_job() -> None:
             url,
             headers={"x-internal-api-key": api_key},
             timeout=REQUEST_TIMEOUT_SECONDS,
+            # gradeiq.net (no www) 308-redirects to www.gradeiq.net --
+            # confirmed live. GRADEIQ_APP_URL now defaults to the www
+            # form directly so the normal path never hits that redirect;
+            # this is just a safety net in case GRADEIQ_APP_URL gets set
+            # back to the bare domain by mistake.
+            follow_redirects=True,
         )
     except httpx.TimeoutException:
         logger.error(

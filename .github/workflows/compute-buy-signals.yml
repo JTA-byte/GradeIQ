@@ -30,5 +30,5 @@ jobs:
       - name: Refresh Buy Signals cache
         env:
           INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
-          GRADEIQ_APP_URL: ${{ vars.GRADEIQ_APP_URL || 'https://gradeiq.net' }}
+          GRADEIQ_APP_URL: ${{ vars.GRADEIQ_APP_URL || 'https://www.gradeiq.net' }}
         run: python -m jobs.compute_buy_signals
