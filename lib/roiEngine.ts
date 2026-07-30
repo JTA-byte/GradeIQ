@@ -10,6 +10,41 @@
 
 export type GraderId = "psa" | "cgc" | "bgs" | "tag";
 
+/**
+ * Grade-label membership per tier per grader -- the tier hierarchy this
+ * app applies everywhere it prices a graded card, highest value first:
+ *
+ * Tier 1 (rarest, highest value): BGS Black Label (perfect subgrades),
+ * CGC Pristine 10, PSA 10, TAG 10.
+ *
+ * Tier 2 (each grader's next grade down, the most common "top grade" in
+ * practice): BGS 10 (Gem Mint, NOT Black Label), PSA 9, CGC 10, TAG 9.
+ * Critically, CGC 10 is Tier 2, not Tier 1 -- it's the equivalent of a
+ * PSA 9, not a PSA 10, despite the matching "10" label.
+ *
+ * Anything below Tier 2 (PSA 8, BGS 9.5, etc.) isn't worth pricing or
+ * showing in ROI calculations at all. "PRI"/"BL" are the actual short
+ * grade codes alt_scraper.py's GRADE_PATTERN captures from scraped
+ * listings; "Pristine 10"/"Black Label" are included too for any source
+ * that writes the longer form.
+ */
+export const GRADE_TIERS = {
+  tier1: {
+    PSA: ["10"],
+    CGC: ["PRI", "Pristine 10"],
+    BGS: ["BL", "Black Label"],
+    TAG: ["10"],
+  },
+  tier2: {
+    PSA: ["9"],
+    CGC: ["10"],
+    BGS: ["10"],
+    TAG: ["9"],
+  },
+} as const;
+
+export type TierName = keyof typeof GRADE_TIERS;
+
 export interface GraderConfig {
   id: GraderId;
   name: string;
@@ -17,7 +52,8 @@ export interface GraderConfig {
   fee: number; // USD
   turnaroundDays: number;
   sellPlatformFeePct: number; // e.g. 0.13 for 13%
-  saleMultiplier: number; // relative price realization vs PSA baseline
+  tier1SaleMultiplier: number; // relative price realization for this grader's Tier 1 grade, vs PSA 10 baseline
+  tier2SaleMultiplier: number; // relative price realization for this grader's Tier 2 grade, vs PSA 9 baseline
 }
 
 export const GRADERS: GraderConfig[] = [
@@ -28,7 +64,8 @@ export const GRADERS: GraderConfig[] = [
     fee: 150,
     turnaroundDays: 10,
     sellPlatformFeePct: 0.13,
-    saleMultiplier: 1.0,
+    tier1SaleMultiplier: 1.0, // PSA 10 -- baseline
+    tier2SaleMultiplier: 0.65, // PSA 9
   },
   {
     id: "cgc",
@@ -37,7 +74,8 @@ export const GRADERS: GraderConfig[] = [
     fee: 22,
     turnaroundDays: 45,
     sellPlatformFeePct: 0.13,
-    saleMultiplier: 0.88,
+    tier1SaleMultiplier: 1.05, // CGC Pristine 10 -- rarer than a PSA 10, commands a premium
+    tier2SaleMultiplier: 0.7, // CGC 10 -- the PSA-9-equivalent grade, not PSA-10-equivalent
   },
   {
     id: "bgs",
@@ -46,7 +84,8 @@ export const GRADERS: GraderConfig[] = [
     fee: 75,
     turnaroundDays: 30,
     sellPlatformFeePct: 0.13,
-    saleMultiplier: 0.93,
+    tier1SaleMultiplier: 1.15, // BGS Black Label -- perfect subgrades, the single most sought-after label in the hobby
+    tier2SaleMultiplier: 0.68, // BGS 10 (Gem Mint, not Black Label)
   },
   {
     id: "tag",
@@ -55,11 +94,12 @@ export const GRADERS: GraderConfig[] = [
     fee: 30,
     turnaroundDays: 15,
     sellPlatformFeePct: 0.13,
-    // TAG is newer with less market liquidity/recognition than the
-    // big three -- realized sale prices currently run lower even at
-    // the same nominal grade, though this gap tends to narrow as
-    // TAG's market presence grows. Revisit this multiplier periodically.
-    saleMultiplier: 0.75,
+    // TAG is newer with less market liquidity/recognition than the big
+    // three -- realized sale prices currently run lower even at the same
+    // nominal grade, though this gap tends to narrow as TAG's market
+    // presence grows. Revisit these multipliers periodically.
+    tier1SaleMultiplier: 0.75, // TAG 10
+    tier2SaleMultiplier: 0.6, // TAG 9
   },
 ];
 
@@ -101,6 +141,13 @@ export interface GraderRecommendation {
   platformFee: number;
   netROI: number;
   turnaroundDays: number;
+  // Deterministic "if it grades exactly this tier" ROI% with this
+  // grader -- distinct from netROI above, which is a single
+  // probability-blended expected value across both tiers plus a below-
+  // tier outcome. These let the UI show "Tier 1 avg $X -> +Y% ROI" and
+  // "Tier 2 avg $X -> +Z% ROI" side by side (see GRADE_TIERS).
+  tier1RoiPct: number;
+  tier2RoiPct: number;
 }
 
 export interface FullRecommendation {
@@ -179,12 +226,18 @@ function calculateGraderRecommendation(
 ): GraderRecommendation {
   const { topProb, midProb, lowProb } = deriveGradeProbabilities(gemRate, vision.overallScore);
 
-  const adjustedTopPrice = market.topGradePrice * grader.saleMultiplier;
-  const adjustedMidPrice = market.midGradePrice * grader.saleMultiplier;
-  const adjustedLowPrice = market.rawMarketPrice * 0.85; // assume a below-grade copy sells near raw, slight discount
+  // market.topGradePrice/midGradePrice are Tier 1/Tier 2 anchor prices
+  // (real PSA 10 / PSA 9 sale averages -- see lib/tcgplayer.ts's
+  // getGradedSalePrices()); each grader's own tier1/tier2SaleMultiplier
+  // rescales that anchor to simulate what THIS grader's Tier 1/Tier 2
+  // grade would likely realize, since the same underlying card doesn't
+  // sell for the same price under every grader's label (see GRADE_TIERS).
+  const adjustedTier1Price = market.topGradePrice * grader.tier1SaleMultiplier;
+  const adjustedTier2Price = market.midGradePrice * grader.tier2SaleMultiplier;
+  const adjustedLowPrice = market.rawMarketPrice * 0.85; // assume a below-tier copy sells near raw, slight discount
 
   const expectedSalePrice =
-    topProb * adjustedTopPrice + midProb * adjustedMidPrice + lowProb * adjustedLowPrice;
+    topProb * adjustedTier1Price + midProb * adjustedTier2Price + lowProb * adjustedLowPrice;
 
   const platformFee = expectedSalePrice * grader.sellPlatformFeePct;
   const netROI =
@@ -192,6 +245,19 @@ function calculateGraderRecommendation(
 
   const gateThreshold = visionGateThreshold(gemRate);
   const passesGateCheck = vision.overallScore >= gateThreshold;
+
+  const tier1RoiPct = calculateTierRoiPct({
+    grader,
+    salePrice: adjustedTier1Price,
+    rawCost: market.rawCost,
+    shippingRoundTrip: market.shippingRoundTrip,
+  });
+  const tier2RoiPct = calculateTierRoiPct({
+    grader,
+    salePrice: adjustedTier2Price,
+    rawCost: market.rawCost,
+    shippingRoundTrip: market.shippingRoundTrip,
+  });
 
   return {
     grader: grader.id,
@@ -207,7 +273,49 @@ function calculateGraderRecommendation(
     platformFee: Math.round(platformFee * 100) / 100,
     netROI: Math.round(netROI * 100) / 100,
     turnaroundDays: grader.turnaroundDays,
+    tier1RoiPct: Math.round(tier1RoiPct * 10) / 10,
+    tier2RoiPct: Math.round(tier2RoiPct * 10) / 10,
   };
+}
+
+/**
+ * Deterministic ROI% for a single, already-realized sale price -- "if
+ * this copy sells for exactly `salePrice`, what's the net ROI%?" Used
+ * for both: (a) roiEngine's own per-grader Tier 1/Tier 2 comparison
+ * above, where salePrice is a multiplier-adjusted cross-grader estimate,
+ * and (b) lib/buySignals.ts's per-card Tier 1/Tier 2 pricing, where
+ * salePrice is a real observed average from that grader's own sales (no
+ * multiplier needed there -- it's already grader-specific real data).
+ * Unlike calculateGraderRecommendation's netROI, this isn't blended
+ * across a probability of hitting each tier -- it's the "what if" number
+ * for one specific, named tier.
+ */
+export function calculateTierRoiPct(params: {
+  grader: GraderConfig;
+  salePrice: number;
+  rawCost: number;
+  shippingRoundTrip?: number;
+}): number {
+  const shipping = params.shippingRoundTrip ?? 20;
+  const netSaleProceeds = params.salePrice * (1 - params.grader.sellPlatformFeePct);
+  const netROI = netSaleProceeds - params.rawCost - params.grader.fee - shipping;
+  const costBasis = params.rawCost + params.grader.fee + shipping;
+  return costBasis > 0 ? (netROI / costBasis) * 100 : 0;
+}
+
+/** Same "one specific tier" reasoning as calculateTierRoiPct, solved backwards for max buy price -- see calculateMaxBuyPrice's docstring for the algebra. */
+export function calculateTierMaxBuyPrice(params: {
+  grader: GraderConfig;
+  salePrice: number;
+  targetRoiPct?: number;
+  shippingRoundTrip?: number;
+}): number {
+  const targetRoiPct = params.targetRoiPct ?? 50;
+  const shipping = params.shippingRoundTrip ?? 20;
+  const netSaleProceeds = params.salePrice * (1 - params.grader.sellPlatformFeePct);
+  const costBasis = netSaleProceeds / (1 + targetRoiPct / 100);
+  const maxBuyPrice = costBasis - params.grader.fee - shipping;
+  return Math.max(0, Math.round(maxBuyPrice * 100) / 100);
 }
 
 /**
@@ -299,8 +407,8 @@ export interface MaxBuyPriceInput {
   targetRoiPct?: number; // default 50 (meaning +50% return on total cash outlay)
   grader: GraderConfig; // supplies fee and sellPlatformFeePct
   gradeProbabilities: GradeProbabilities; // see deriveGradeProbabilities()
-  topGradePrice: number; // e.g. PSA 10 sale price, unadjusted -- saleMultiplier is applied here
-  midGradePrice: number; // e.g. PSA 9 sale price, unadjusted
+  topGradePrice: number; // e.g. PSA 10 sale price, unadjusted -- grader.tier1SaleMultiplier is applied here
+  midGradePrice: number; // e.g. PSA 9 sale price, unadjusted -- grader.tier2SaleMultiplier is applied here
   belowGradePrice: number; // fallback price if it misses the top/mid tiers (e.g. raw sale price)
   shippingRoundTrip?: number; // default 20
 }
@@ -325,8 +433,8 @@ export function calculateMaxBuyPrice(input: MaxBuyPriceInput): number {
   const shipping = input.shippingRoundTrip ?? 20;
   const { topProb, midProb, lowProb } = input.gradeProbabilities;
 
-  const adjustedTopPrice = input.topGradePrice * input.grader.saleMultiplier;
-  const adjustedMidPrice = input.midGradePrice * input.grader.saleMultiplier;
+  const adjustedTopPrice = input.topGradePrice * input.grader.tier1SaleMultiplier;
+  const adjustedMidPrice = input.midGradePrice * input.grader.tier2SaleMultiplier;
 
   const expectedSalePrice =
     topProb * adjustedTopPrice + midProb * adjustedMidPrice + lowProb * input.belowGradePrice;

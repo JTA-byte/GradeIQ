@@ -2,7 +2,16 @@
  * Tests for the ROI engine. Run with: npx tsx lib/roiEngine.test.ts
  * (No test framework dependency -- simple assertions for fast iteration.)
  */
-import { getGraderRecommendations, CardMarketData, GemRateData, VisionAssessment } from "./roiEngine";
+import {
+  getGraderRecommendations,
+  calculateTierRoiPct,
+  calculateTierMaxBuyPrice,
+  GRADE_TIERS,
+  GRADERS,
+  CardMarketData,
+  GemRateData,
+  VisionAssessment,
+} from "./roiEngine";
 
 let passed = 0;
 let failed = 0;
@@ -204,6 +213,77 @@ console.log(
     (result.bestOption?.netROI ?? 1) <= 0,
     `best option net ROI should be <= 0, got ${result.bestOption?.netROI}`
   );
+}
+
+console.log("\nTest 7: GRADE_TIERS -- CGC 10 is Tier 2 (PSA 9 equivalent), not Tier 1");
+{
+  assert(GRADE_TIERS.tier1.PSA.includes("10"), "PSA 10 should be Tier 1");
+  assert(GRADE_TIERS.tier1.CGC.includes("PRI"), "CGC Pristine (PRI) should be Tier 1");
+  assert(!(GRADE_TIERS.tier1.CGC as readonly string[]).includes("10"), "CGC 10 should NOT be Tier 1");
+  assert(GRADE_TIERS.tier2.CGC.includes("10"), "CGC 10 should be Tier 2 (PSA 9 equivalent)");
+  assert(GRADE_TIERS.tier1.BGS.includes("BL"), "BGS Black Label (BL) should be Tier 1");
+  assert(GRADE_TIERS.tier2.BGS.includes("10"), "BGS 10 (Gem Mint) should be Tier 2, not Black Label");
+}
+
+console.log("\nTest 8: Grader Tier 1/Tier 2 sale multipliers match the specified hierarchy");
+{
+  const psa = GRADERS.find((g) => g.id === "psa")!;
+  const cgc = GRADERS.find((g) => g.id === "cgc")!;
+  const bgs = GRADERS.find((g) => g.id === "bgs")!;
+  const tag = GRADERS.find((g) => g.id === "tag")!;
+  assert(bgs.tier1SaleMultiplier === 1.15, `BGS Black Label multiplier should be 1.15, got ${bgs.tier1SaleMultiplier}`);
+  assert(cgc.tier1SaleMultiplier === 1.05, `CGC Pristine 10 multiplier should be 1.05, got ${cgc.tier1SaleMultiplier}`);
+  assert(psa.tier1SaleMultiplier === 1.0, `PSA 10 multiplier should be 1.0 (baseline), got ${psa.tier1SaleMultiplier}`);
+  assert(tag.tier1SaleMultiplier === 0.75, `TAG 10 multiplier should be 0.75, got ${tag.tier1SaleMultiplier}`);
+  assert(cgc.tier2SaleMultiplier === 0.7, `CGC 10 multiplier should be 0.70, got ${cgc.tier2SaleMultiplier}`);
+  assert(bgs.tier2SaleMultiplier === 0.68, `BGS 10 multiplier should be 0.68, got ${bgs.tier2SaleMultiplier}`);
+  assert(psa.tier2SaleMultiplier === 0.65, `PSA 9 multiplier should be 0.65, got ${psa.tier2SaleMultiplier}`);
+  assert(tag.tier2SaleMultiplier === 0.6, `TAG 9 multiplier should be 0.60, got ${tag.tier2SaleMultiplier}`);
+}
+
+console.log("\nTest 9: calculateTierRoiPct/calculateTierMaxBuyPrice are deterministic per-tier (not probability-blended)");
+{
+  const psa = GRADERS.find((g) => g.id === "psa")!;
+  const tier1Roi = calculateTierRoiPct({ grader: psa, salePrice: 450, rawCost: 85, shippingRoundTrip: 20 });
+  const tier2Roi = calculateTierRoiPct({ grader: psa, salePrice: 200, rawCost: 85, shippingRoundTrip: 20 });
+  assert(tier1Roi > tier2Roi, `Tier 1 ROI (${tier1Roi}) should exceed Tier 2 ROI (${tier2Roi}) for a higher sale price`);
+
+  const tier1MaxBuy = calculateTierMaxBuyPrice({ grader: psa, salePrice: 450 });
+  const tier2MaxBuy = calculateTierMaxBuyPrice({ grader: psa, salePrice: 200 });
+  assert(
+    tier1MaxBuy > tier2MaxBuy,
+    `Tier 1 max buy price (${tier1MaxBuy}) should exceed Tier 2 max buy price (${tier2MaxBuy})`
+  );
+}
+
+console.log("\nTest 10: getGraderRecommendations includes deterministic tier1RoiPct/tier2RoiPct per grader");
+{
+  const market: CardMarketData = {
+    rawCost: 85,
+    rawMarketPrice: 100,
+    topGradePrice: 450,
+    midGradePrice: 200,
+    shippingRoundTrip: 20,
+  };
+  const gemRates: GemRateData = { psa: 20, cgc: 22, bgs: 15, tag: 18 };
+  const vision: VisionAssessment = {
+    centeringPct: 55,
+    surfaceScore: 8.5,
+    edgeScore: 8.5,
+    cornerScore: 8.5,
+    overallScore: 8.5,
+  };
+  const result = getGraderRecommendations(market, gemRates, vision);
+  for (const rec of result.recommendations) {
+    assert(
+      typeof rec.tier1RoiPct === "number" && typeof rec.tier2RoiPct === "number",
+      `${rec.grader} should have numeric tier1RoiPct/tier2RoiPct`
+    );
+    assert(
+      rec.tier1RoiPct >= rec.tier2RoiPct,
+      `${rec.grader} tier1RoiPct (${rec.tier1RoiPct}) should be >= tier2RoiPct (${rec.tier2RoiPct}) given topGradePrice > midGradePrice`
+    );
+  }
 }
 
 console.log(`\n${"=".repeat(50)}`);

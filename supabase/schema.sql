@@ -163,6 +163,18 @@ create table buy_signals_cache (
   is_raw_price_estimated boolean not null default false,
   top_grade_price numeric not null,
   gap_amount numeric not null,
+  -- Tier 1 (BGS Black Label / CGC Pristine 10 / PSA 10 / TAG 10) and
+  -- Tier 2 (BGS 10 / PSA 9 / CGC 10 / TAG 9) priced independently -- see
+  -- lib/roiEngine.ts's GRADE_TIERS. Nullable: a card can have real sales
+  -- in one tier but not the other (top_grade_price/roi_percent/
+  -- max_buy_price above already reflect "Tier 1 if available, else
+  -- Tier 2" as the card's single primary signal).
+  tier1_price numeric,
+  tier1_roi_percent numeric,
+  tier1_max_buy_price numeric,
+  tier2_price numeric,
+  tier2_roi_percent numeric,
+  tier2_max_buy_price numeric,
   implied_gem_rate numeric not null default 0,
   is_gem_rate_implied boolean not null default false,
   sale_count int not null,

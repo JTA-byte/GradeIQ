@@ -289,6 +289,14 @@ function HowToUseSection() {
             <span className="text-rust font-mono">below 50 = weak</span>.
           </p>
           <p>
+            <span className="font-display text-ink">Tier 1</span> (BGS Black Label, CGC Pristine 10, PSA 10,
+            TAG 10) is each grader&apos;s rarest, highest-value grade.{" "}
+            <span className="font-display text-ink">Tier 2</span> (BGS 10, PSA 9, CGC 10, TAG 9) is the next
+            grade down and the more commonly achieved one. Note that{" "}
+            <span className="font-mono">CGC 10 is a Tier 2 grade</span> equivalent to a PSA 9, not a PSA 10,
+            despite the matching number.
+          </p>
+          <p>
             <span className="font-display text-ink">Max Buy Price</span> is the most you should pay for a
             raw copy to hit a 50% net ROI after all grading, shipping, and selling fees. Paying more than
             this erodes the opportunity below that target.
@@ -451,6 +459,54 @@ export function BuySignalCard({ signal: s }: { signal: BuySignal }) {
           <div className="font-display text-xl">${Math.round(s.maxBuyPrice).toLocaleString()}</div>
         </div>
       </div>
+
+      {/* Tier 1 / Tier 2 breakdown -- see lib/roiEngine.ts's GRADE_TIERS.
+          CGC 10 is deliberately labeled as Tier 2 (PSA 9 equivalent),
+          not Tier 1, even though the number "10" matches PSA's top grade. */}
+      {(s.tier1Price !== null || s.tier2Price !== null) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono text-xs">
+          <div className={`border border-line px-3 py-2 ${s.tier1Price === null ? "opacity-40" : ""}`}>
+            <div className="text-[9px] uppercase tracking-widest text-slate/60 mb-1">
+              Tier 1 (BGS BL / CGC Pristine / PSA 10 / TAG 10)
+            </div>
+            {s.tier1Price !== null ? (
+              <div className="flex items-baseline justify-between gap-2">
+                <span>
+                  avg <span className="font-display text-base text-ink">${Math.round(s.tier1Price).toLocaleString()}</span>
+                </span>
+                <span className={s.tier1RoiPct !== null && s.tier1RoiPct >= 0 ? "text-moss" : "text-rust"}>
+                  {s.tier1RoiPct !== null ? `${s.tier1RoiPct >= 0 ? "+" : ""}${s.tier1RoiPct.toFixed(0)}% ROI` : "—"}
+                </span>
+              </div>
+            ) : (
+              <span className="text-slate/50">No Tier 1 sales yet</span>
+            )}
+            {s.tier1MaxBuyPrice !== null && (
+              <div className="text-slate/60 mt-1">Buy ≤ ${Math.round(s.tier1MaxBuyPrice).toLocaleString()}</div>
+            )}
+          </div>
+          <div className={`border border-line px-3 py-2 ${s.tier2Price === null ? "opacity-40" : ""}`}>
+            <div className="text-[9px] uppercase tracking-widest text-slate/60 mb-1">
+              Tier 2 (PSA 9 / CGC 10 / BGS 10 / TAG 9)
+            </div>
+            {s.tier2Price !== null ? (
+              <div className="flex items-baseline justify-between gap-2">
+                <span>
+                  avg <span className="font-display text-base text-ink">${Math.round(s.tier2Price).toLocaleString()}</span>
+                </span>
+                <span className={s.tier2RoiPct !== null && s.tier2RoiPct >= 0 ? "text-moss" : "text-rust"}>
+                  {s.tier2RoiPct !== null ? `${s.tier2RoiPct >= 0 ? "+" : ""}${s.tier2RoiPct.toFixed(0)}% ROI` : "—"}
+                </span>
+              </div>
+            ) : (
+              <span className="text-slate/50">No Tier 2 sales yet</span>
+            )}
+            {s.tier2MaxBuyPrice !== null && (
+              <div className="text-slate/60 mt-1">Buy ≤ ${Math.round(s.tier2MaxBuyPrice).toLocaleString()}</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Signal quality row */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-slate/70 border-t border-line pt-3">

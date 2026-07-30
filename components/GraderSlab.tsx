@@ -5,6 +5,18 @@ function formatCurrency(value: number): string {
   return `${sign}$${Math.abs(Math.round(value)).toLocaleString()}`;
 }
 
+function formatPct(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(0)}%`;
+}
+
+// CGC's Tier 2 grade is numbered "10" but is the PSA-9-equivalent grade,
+// not the PSA-10-equivalent one -- see lib/roiEngine.ts's GRADE_TIERS.
+// Called out here since it's the one grader/tier pairing where the
+// number alone would mislead someone comparing across graders.
+const TIER2_EQUIVALENCE_NOTE: Partial<Record<GraderRecommendation["grader"], string>> = {
+  cgc: "CGC 10 = PSA 9 equivalent",
+};
+
 function confidenceLabel(level: "low" | "medium" | "high"): string {
   switch (level) {
     case "high":
@@ -77,6 +89,22 @@ export function GraderSlab({
           <dt>{confidenceLabel(rec.gemRateConfidence)}</dt>
           <dd></dd>
         </div>
+      </dl>
+
+      {/* Tier 1 / Tier 2 ROI -- "if it grades exactly this tier", distinct
+          from the single probability-blended netROI figure above. */}
+      <dl className="font-mono text-xs space-y-1 border-t border-line pt-3 mt-1">
+        <div className="flex justify-between">
+          <dt className="text-slate/70">Tier 1 ROI</dt>
+          <dd className={rec.tier1RoiPct >= 0 ? "text-moss" : "text-rust"}>{formatPct(rec.tier1RoiPct)}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-slate/70">Tier 2 ROI</dt>
+          <dd className={rec.tier2RoiPct >= 0 ? "text-moss" : "text-rust"}>{formatPct(rec.tier2RoiPct)}</dd>
+        </div>
+        {TIER2_EQUIVALENCE_NOTE[rec.grader] && (
+          <div className="text-slate/50 text-[10px]">{TIER2_EQUIVALENCE_NOTE[rec.grader]}</div>
+        )}
       </dl>
     </div>
   );

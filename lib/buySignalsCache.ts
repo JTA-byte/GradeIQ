@@ -35,6 +35,12 @@ interface BuySignalCacheRow {
   is_raw_price_estimated: boolean;
   top_grade_price: number;
   gap_amount: number;
+  tier1_price: number | null;
+  tier1_roi_percent: number | null;
+  tier1_max_buy_price: number | null;
+  tier2_price: number | null;
+  tier2_roi_percent: number | null;
+  tier2_max_buy_price: number | null;
   implied_gem_rate: number;
   is_gem_rate_implied: boolean;
   sale_count: number;
@@ -77,6 +83,15 @@ function fromCacheRow(row: BuySignalCacheRow): BuySignal {
     isRawPriceEstimated: row.is_raw_price_estimated,
     topGradePrice: row.top_grade_price,
     gapDollars: row.gap_amount,
+    // Nullish-coalesced, not just passed through -- older cache rows
+    // written before the tier1_*/tier2_* columns existed come back with
+    // these as `undefined` from a `select("*")`, not `null`.
+    tier1Price: row.tier1_price ?? null,
+    tier1RoiPct: row.tier1_roi_percent ?? null,
+    tier1MaxBuyPrice: row.tier1_max_buy_price ?? null,
+    tier2Price: row.tier2_price ?? null,
+    tier2RoiPct: row.tier2_roi_percent ?? null,
+    tier2MaxBuyPrice: row.tier2_max_buy_price ?? null,
     saleCount: row.sale_count,
     recentSaleCount90d: row.recent_sale_count_90d,
     priceConfidence: row.price_confidence as PriceConfidence,

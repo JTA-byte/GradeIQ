@@ -41,9 +41,12 @@ import { createServiceRoleClient } from "@/lib/supabase/server";
 import {
   CardMarketData,
   GemRateData,
+  GRADE_TIERS,
   GraderId,
   GRADERS,
   calculateMaxBuyPrice,
+  calculateTierMaxBuyPrice,
+  calculateTierRoiPct,
   deriveGradeProbabilities,
   getGraderRecommendations,
 } from "./roiEngine";
@@ -56,18 +59,15 @@ const PAGE_SIZE = 1000; // PostgREST's default per-request row cap
 // pretending we know anything about a specific physical copy's condition.
 const UNSCANNED_VISION_SCORE = 7.5;
 
-// Grade labels that count as "top tier" / "mid tier" per grader. PRI
-// (CGC Pristine) and BL (BGS Black Label) are each grader's actual top
-// tier, not a numeric "10" -- see alt_scraper.py's GRADE_PATTERN.
-const TOP_GRADE_LABELS = new Set(["10", "PRI", "BL"]);
-const MID_GRADE_LABELS = new Set(["9.5", "9"]);
-
 // How a raw grade-label maps to a human-readable target grade, e.g.
 // "PSA 10", "CGC Pristine", "BGS Black Label".
 const GRADE_LABEL_DISPLAY: Record<string, string> = {
   "10": "10",
+  "9": "9",
   PRI: "Pristine",
+  "Pristine 10": "Pristine",
   BL: "Black Label",
+  "Black Label": "Black Label",
 };
 
 const SOURCE_DISPLAY: Record<string, string> = {
@@ -151,6 +151,18 @@ export interface BuySignal {
   isRawPriceEstimated: boolean;
   topGradePrice: number;
   gapDollars: number;
+  // Tier 1 (BGS Black Label / CGC Pristine 10 / PSA 10 / TAG 10) and
+  // Tier 2 (BGS 10 / PSA 9 / CGC 10 / TAG 9) priced and computed
+  // independently, per GRADE_TIERS -- null when this card/grader has no
+  // real sales in that tier. topGradePrice/expectedRoiPct/maxBuyPrice
+  // above already reflect "Tier 1 if it has sales, else Tier 2" as the
+  // card's single primary signal; these give the UI both numbers at once.
+  tier1Price: number | null;
+  tier1RoiPct: number | null;
+  tier1MaxBuyPrice: number | null;
+  tier2Price: number | null;
+  tier2RoiPct: number | null;
+  tier2MaxBuyPrice: number | null;
   saleCount: number; // how many real top-grade sales this estimate rests on (all-time)
   recentSaleCount90d: number;
   priceConfidence: PriceConfidence;
@@ -372,19 +384,49 @@ function evaluateCardForGrader(
   topSalesRows: MarketSaleRow[];
   gemRatePct: number;
   isGemRateImplied: boolean;
+  tier1Price: number | null;
+  tier1RoiPct: number | null;
+  tier1MaxBuyPrice: number | null;
+  tier2Price: number | null;
+  tier2RoiPct: number | null;
+  tier2MaxBuyPrice: number | null;
 } | null {
   const graderConfig = GRADERS.find((g) => g.id === graderCode.toLowerCase());
   if (!graderConfig) return null; // not one of GradeIQ's 4 supported graders (e.g. SGC)
 
-  const topSales = graderSales.filter((s) => TOP_GRADE_LABELS.has(s.grade));
-  if (topSales.length === 0) return null; // nothing to anchor an estimate on
+  // GRADE_TIERS is keyed by grader NAME ("PSA"/"CGC"/"BGS"/"TAG"), not id --
+  // graderConfig.name is exactly one of those four strings.
+  const tier1Labels: readonly string[] =
+    GRADE_TIERS.tier1[graderConfig.name as keyof typeof GRADE_TIERS.tier1] ?? [];
+  const tier2Labels: readonly string[] =
+    GRADE_TIERS.tier2[graderConfig.name as keyof typeof GRADE_TIERS.tier2] ?? [];
 
-  const midSales = graderSales.filter((s) => MID_GRADE_LABELS.has(s.grade));
+  const tier1Sales = graderSales.filter((s) => tier1Labels.includes(s.grade));
+  const tier2Sales = graderSales.filter((s) => tier2Labels.includes(s.grade));
 
-  const topGradePrice = average(topSales.map((s) => s.sale_price));
+  // Nothing in Tier 1 or Tier 2 -- everything below Tier 2 (PSA 8, BGS
+  // 9.5, etc.) isn't worth anchoring a buy signal on at all.
+  if (tier1Sales.length === 0 && tier2Sales.length === 0) return null;
+
+  const tier1Price = tier1Sales.length > 0 ? average(tier1Sales.map((s) => s.sale_price)) : null;
+  const tier2Price = tier2Sales.length > 0 ? average(tier2Sales.map((s) => s.sale_price)) : null;
+
+  // Primary signal is Tier 1 (the rarest, highest-value grade); Tier 2
+  // is the fallback anchor only when this card/grader has no real Tier 1
+  // sales yet. topSales below drives every existing "top grade" display
+  // field (targetGradeLabel, topGradePrice, saleCount, trend, etc.).
+  const anchorTier: 1 | 2 = tier1Price !== null ? 1 : 2;
+  const topSales = anchorTier === 1 ? tier1Sales : tier2Sales;
+  const topGradePrice = anchorTier === 1 ? tier1Price! : tier2Price!;
+
+  // midGradePrice feeds the existing probability-blended ROI/IQ model
+  // (deriveGradeProbabilities' top/mid/low split) as "the tier down from
+  // the anchor" -- real Tier 2 data when the anchor is Tier 1 and some
+  // exists, otherwise an estimate (there's no real tier below Tier 2 to
+  // use, and PSA 8/BGS 9.5-class sales are deliberately excluded above).
   const midGradePrice =
-    midSales.length > 0
-      ? average(midSales.map((s) => s.sale_price))
+    anchorTier === 1 && tier2Price !== null
+      ? tier2Price
       : topGradePrice * ESTIMATED_MID_TO_TOP_GRADE_RATIO_FALLBACK;
 
   const isRawPriceEstimated = realRawMarketPrice === null;
@@ -395,9 +437,52 @@ function evaluateCardForGrader(
   // implied rate computed from this grader's own sold listings (see
   // computeImpliedGemRate()'s docstring), and only then to 0 (no signal
   // at all -- fewer than MIN_SALES_FOR_IMPLIED_GEM_RATE graded sales).
-  const impliedGemRate = computeImpliedGemRate(topSales.length, graderSales.length);
+  // Always measured against true Tier 1 (the rarest grade), even when
+  // Tier 2 is what's anchoring the price above -- "gem rate" means the
+  // population share hitting the single best grade, not whichever tier
+  // happens to have enough sales to price off of.
+  const impliedGemRate = computeImpliedGemRate(tier1Sales.length, graderSales.length);
   const isGemRateImplied = gemRateRow === undefined && impliedGemRate !== null;
   const gemRatePct = gemRateRow?.gem_rate ?? impliedGemRate ?? 0;
+
+  const tier1RoiPct =
+    tier1Price !== null
+      ? Math.round(
+          calculateTierRoiPct({
+            grader: graderConfig,
+            salePrice: tier1Price,
+            rawCost,
+            shippingRoundTrip: DEFAULT_SHIPPING_ROUND_TRIP,
+          }) * 10
+        ) / 10
+      : null;
+  const tier1MaxBuyPrice =
+    tier1Price !== null
+      ? calculateTierMaxBuyPrice({
+          grader: graderConfig,
+          salePrice: tier1Price,
+          shippingRoundTrip: DEFAULT_SHIPPING_ROUND_TRIP,
+        })
+      : null;
+  const tier2RoiPct =
+    tier2Price !== null
+      ? Math.round(
+          calculateTierRoiPct({
+            grader: graderConfig,
+            salePrice: tier2Price,
+            rawCost,
+            shippingRoundTrip: DEFAULT_SHIPPING_ROUND_TRIP,
+          }) * 10
+        ) / 10
+      : null;
+  const tier2MaxBuyPrice =
+    tier2Price !== null
+      ? calculateTierMaxBuyPrice({
+          grader: graderConfig,
+          salePrice: tier2Price,
+          shippingRoundTrip: DEFAULT_SHIPPING_ROUND_TRIP,
+        })
+      : null;
 
   const market: CardMarketData = {
     rawCost,
@@ -479,6 +564,12 @@ function evaluateCardForGrader(
     topSalesRows: topSales,
     gemRatePct,
     isGemRateImplied,
+    tier1Price,
+    tier1RoiPct,
+    tier1MaxBuyPrice,
+    tier2Price,
+    tier2RoiPct,
+    tier2MaxBuyPrice,
   };
 }
 
@@ -877,6 +968,12 @@ function buildSignalForCard(
     isRawPriceEstimated: best.isRawPriceEstimated,
     topGradePrice: Math.round(best.topGradePrice * 100) / 100,
     gapDollars: Math.round(gapDollars * 100) / 100,
+    tier1Price: best.tier1Price !== null ? Math.round(best.tier1Price * 100) / 100 : null,
+    tier1RoiPct: best.tier1RoiPct,
+    tier1MaxBuyPrice: best.tier1MaxBuyPrice,
+    tier2Price: best.tier2Price !== null ? Math.round(best.tier2Price * 100) / 100 : null,
+    tier2RoiPct: best.tier2RoiPct,
+    tier2MaxBuyPrice: best.tier2MaxBuyPrice,
     saleCount: best.saleCount,
     recentSaleCount90d: best.recentSaleCount90d,
     priceConfidence: confidenceFor(best.recentSaleCount90d),
