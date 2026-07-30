@@ -2,26 +2,38 @@ import { Suspense } from "react";
 import { AppHeader } from "@/components/AppHeader";
 import { AppFooter } from "@/components/AppFooter";
 import { BuySignalsTable } from "@/components/BuySignalsTable";
-import { getBuySignals } from "@/lib/buySignals";
+import { getCachedBuySignals } from "@/lib/buySignalsCache";
 
 // Render on-demand instead of pre-rendering at build time -- with
 // 2,220+ cards, the pre-rendered HTML for this page exceeds Vercel's
 // build output size limit (FALLBACK_BODY_TOO_LARGE at 19.71 MB).
-//
-// force-dynamic means Next's Full Route Cache never applies here, so a
-// `revalidate` export on this page would be a no-op -- it doesn't
-// actually cache anything once force-dynamic is set. The real caching
-// (recompute at most once an hour, not on every request) lives one
-// layer down: lib/buySignals.ts's getBuySignals() is wrapped in
-// unstable_cache. That's the fix for the production timeout that was
-// happening here -- getBuySignals() does a full pass over market_sales
-// (1.8M+ rows and growing), and re-running that on every single request
-// (which force-dynamic + no data-layer caching was doing) is what
-// actually caused it, not any single slow calculation.
 export const dynamic = "force-dynamic";
 
+/**
+ * Coarse relative-time string ("3 hours ago") for the cache's
+ * computed_at. Computed at render time on this force-dynamic page, so
+ * it's accurate as of each request -- it just won't tick upward live if
+ * someone leaves the tab open, which is fine for a "how stale is this
+ * data" indicator.
+ */
+function formatRelativeTime(iso: string): string {
+  const diffMinutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes === 1 ? "" : "s"} ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? "" : "s"} ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
+}
+
 export default async function BuySignalsPage() {
-  const signals = await getBuySignals();
+  // Reads pre-computed results from buy_signals_cache instead of running
+  // getBuySignals() (lib/buySignals.ts) live -- that full recompute over
+  // market_sales (1.8M+ rows and growing) is what was timing out this
+  // page in production. The cache is refreshed nightly at 2am UTC by
+  // python-services/jobs/compute_buy_signals.py; see
+  // app/api/internal/refresh-buy-signals-cache for how.
+  const { signals, lastUpdated } = await getCachedBuySignals();
 
   return (
     <main className="min-h-screen bg-paper text-ink font-body">
@@ -31,7 +43,12 @@ export default async function BuySignalsPage() {
           <h1 className="font-display text-3xl mb-2">Buy Signals</h1>
           <p className="font-mono text-sm text-slate max-w-2xl">
             Top grading opportunities across every card with real scraped sale data, ranked by IQ
-            Score. Updates nightly as the scrapers run.
+            Score.
+          </p>
+          <p className="font-mono text-xs text-slate/60 mt-2">
+            {lastUpdated
+              ? `Last updated ${formatRelativeTime(lastUpdated)} · refreshes nightly at 2am UTC`
+              : "Not yet computed -- refreshes nightly at 2am UTC"}
           </p>
           {signals.length > 0 && (
             <p className="font-mono text-xs text-slate/60 mt-2">
@@ -45,8 +62,9 @@ export default async function BuySignalsPage() {
         {signals.length === 0 ? (
           <div className="border border-line bg-white/40 p-10 text-center">
             <p className="font-mono text-sm text-slate">
-              No buy signals yet -- no cards have scraped sale data. Run the nightly scrapers
-              (python-services/jobs/nightly_price_scrape.py) to populate this page.
+              No buy signals yet -- the cache hasn&apos;t been computed. It refreshes automatically
+              at 2am UTC, or trigger it manually by running
+              python-services/jobs/compute_buy_signals.py.
             </p>
           </div>
         ) : (

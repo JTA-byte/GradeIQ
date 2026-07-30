@@ -116,6 +116,72 @@ alter table market_sales enable row level security;
 create policy "Anyone can read market_sales" on market_sales for select using (true);
 
 -- =========================================
+-- BUY_SIGNALS_CACHE: pre-computed Buy Signals results, one row per card.
+--
+-- Refreshed nightly (2am UTC) by app/api/internal/refresh-buy-signals-cache,
+-- triggered by python-services/jobs/compute_buy_signals.py -- that route
+-- calls the EXISTING lib/buySignals.ts getBuySignals() (the real, tested
+-- ROI/IQ engine) and upserts its output here rather than recomputing it
+-- from market_sales on every page load, which is what made the Buy
+-- Signals page time out in production (a full pass over 1.8M+ market_sales
+-- rows). app/buy-signals/page.tsx now just reads this table directly --
+-- a few thousand rows, one fast query, instead of the full computation.
+--
+-- The refresh route reuses getBuySignals() rather than reimplementing its
+-- math -- a second implementation (in Python or anywhere else) would be a
+-- second place for the ROI engine/IQ scoring to drift out of sync, the
+-- same reasoning behind every other internal job in this codebase
+-- (check_price_alerts.py, scan_active_listings.py) calling into the
+-- TypeScript app over HTTP instead of duplicating its logic.
+--
+-- Columns beyond what was originally asked for (recent_sales,
+-- why_reason, iq_reason, variant_detail, is_raw_price_estimated,
+-- recent_sale_count_90d, graded_price_change_pct, data_quality_score,
+-- best_grader_name) are here so switching the page to read from this
+-- table doesn't silently drop features it already has (the expandable
+-- recent-sales list, the "why this card" narrative, the data-quality
+-- badge, etc.).
+-- =========================================
+create table buy_signals_cache (
+  card_id uuid primary key references cards(id),
+  card_name text not null,
+  set_name text not null,
+  card_number text,
+  language text not null,
+  variant text not null,
+  variant_detail text,
+  iq_score int not null,
+  iq_label text not null,
+  iq_reason text not null,
+  why_reason text not null,
+  roi_percent numeric not null,
+  max_buy_price numeric not null,
+  best_grader text not null,
+  best_grader_name text not null,
+  target_grade text not null, -- e.g. "PSA 10"
+  raw_price numeric not null,
+  is_raw_price_estimated boolean not null default false,
+  top_grade_price numeric not null,
+  gap_amount numeric not null,
+  implied_gem_rate numeric not null default 0,
+  is_gem_rate_implied boolean not null default false,
+  sale_count int not null,
+  recent_sale_count_90d int not null default 0,
+  last_sale_date timestamptz,
+  price_confidence text not null check (price_confidence in ('high', 'medium', 'low')),
+  recent_sales jsonb not null default '[]'::jsonb,
+  trend text not null check (trend in ('trending_up', 'stable', 'cooling')),
+  graded_price_change_pct numeric,
+  data_quality_score int not null default 0,
+  computed_at timestamptz not null default now()
+);
+
+create index idx_buy_signals_cache_iq on buy_signals_cache (iq_score desc);
+
+alter table buy_signals_cache enable row level security;
+create policy "Anyone can read buy_signals_cache" on buy_signals_cache for select using (true);
+
+-- =========================================
 -- ACTIVE_LISTINGS: currently-live (not yet sold) Alt.xyz listings, from
 -- python-services/scrapers/alt_scraper.py's fetch_active_listings().
 --
